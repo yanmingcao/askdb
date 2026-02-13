@@ -158,6 +158,71 @@ askdb ask "按金额降序排列"
 askdb ask "新问题" --clear-context
 ```
 
+## Codebase Structure & Architecture
+
+### Directory Layout
+
+- `src/cli/` — CLI commands, interactive loop, and result rendering.
+  - `main.py`: command entry points (ask/train/dump-ddl/etc.)
+  - `semantic_tui.py`: prompt_toolkit-based editor for the semantic store
+  - `session_state.py`: conversation context persistence (sliding window)
+- `src/config/` — configuration and service initialization.
+  - `database.py`: DB config + adapter factory wiring
+  - `vanna_config.py`: Vanna instance setup and LLM provider config
+- `src/db/` — database adapters.
+  - `mysql_adapter.py`, `postgres_adapter.py`, `sqlite_adapter.py`
+- `src/semantic/` — semantic metadata and schema dumps.
+  - `semantic_store.json`: semantic descriptions, notes, examples, allowlist
+  - `ddl_dump.json`: raw DDL snapshot (bootstrap)
+- `src/training/` — schema extraction and Vanna training.
+  - `schema_extractor.py`: DDL/relationship/semantic training routines
+
+### Data Flow
+
+```text
+[User Question]
+      |
+      v
+  CLI (src/cli/main.py)
+      |
+      v
+  Vanna (src/config/vanna_config.py)
+      |        ^
+      |        |
+      v        |
+  SQL Generation + Context Retrieval (ChromaDB)
+      |        ^
+      |        |
+      v        |
+  Validation (allowlist) <--- semantic_store.json
+      |
+      v
+  DB Adapter (src/db/*) ---> Target Database
+      |
+      v
+  Results -> Table/Chart/Insights
+```
+
+## Key Technologies
+
+- **Vanna AI** (`vanna`): NL2SQL engine with retrieval-augmented prompt assembly.
+- **ChromaDB** (`chromadb`): local vector store for schema/docs/examples retrieval.
+- **prompt_toolkit**: semantic store TUI and interactive inputs.
+
+### Module Map
+
+```text
+askdb/
+├── src/
+│   ├── cli/          # CLI commands, TUI, session state
+│   ├── config/       # DB + Vanna configuration
+│   ├── db/           # Database adapters (MySQL, Postgres, SQLite)
+│   ├── semantic/     # Semantic store + DDL dumps
+│   └── training/     # Schema extraction + Vanna training
+├── chromadb_data/    # Local vector store (git-ignored)
+└── .env              # Environment variables
+```
+
 ## LLM Providers
 
 Supported via `.env`:
