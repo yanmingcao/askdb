@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from vanna.legacy.chromadb.chromadb_vector import ChromaDB_VectorStore
 
-from src.config.database import get_db_config
+from src.config.database import get_db_utils
 
 load_dotenv()
 
@@ -204,15 +204,8 @@ def create_vanna_instance() -> AskDBVanna:
     client = OpenAI(api_key=config["api_key"], base_url=base_url)
     vn = AskDBVanna(config=config, client=client)
 
-    db_config = get_db_config()
-    conn_params = db_config.get_connection_string()
-    vn.connect_to_mysql(
-        host=conn_params["host"],
-        dbname=conn_params["dbname"],
-        user=conn_params["user"],
-        password=conn_params["password"],
-        port=conn_params["port"],
-    )
+    db_utils = get_db_utils()
+    db_utils.connect_vanna(vn)
     return vn
 
 
