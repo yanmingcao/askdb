@@ -7,6 +7,8 @@ from pathlib import Path
 import click
 from rich.console import Console
 from rich.table import Table
+from rich.cells import cell_len
+import pandas as pd
 
 console = Console()
 
@@ -19,10 +21,10 @@ def cli() -> None:
 
 @cli.command("test-connection")
 def test_connection() -> None:
-    """Test the MySQL database connection."""
-    from src.config.database import get_db_config
+    """Test the configured database connection."""
+    from src.config.database import get_db_utils
 
-    db = get_db_config()
+    db = get_db_utils()
     if db.test_connection():
         console.print("[green]Database connection successful![/green]")
     else:
@@ -155,7 +157,7 @@ def semantic_tui() -> None:
 
 
 @cli.command()
-@click.argument("question")
+@click.argument("question", required=False)
 @click.option(
     "--max-retries",
     default=1,
@@ -168,19 +170,117 @@ def semantic_tui() -> None:
     is_flag=True,
     help="Show prompt/response details and LLM call diagnostics.",
 )
-def ask(question: str, max_retries: int, verbose: bool) -> None:
-    """Ask a natural language question about your database."""
+@click.option(
+    "--clear-context",
+    is_flag=True,
+    help="Clear previous conversation context before asking.",
+)
+@click.option(
+    "--insights/--no-insights",
+    default=True,
+    help="Generate short LLM insights after results.",
+)
+def ask(
+    question: str | None,
+    max_retries: int,
+    verbose: bool,
+    clear_context: bool,
+    insights: bool,
+) -> None:
+    """Ask a natural language question about your database.
+
+    If QUESTION is provided, runs once and exits (non-interactive mode).
+    If QUESTION is omitted, enters interactive loop mode where you can ask multiple questions.
+
+    Interactive mode:
+    - Type your questions and press Enter
+    - Type 'exit', 'quit', or 'q' to leave the loop
+    - Context is maintained across questions automatically
+    - Use --clear-context flag to start with fresh context
+
+    Each ask automatically uses context from the previous turn (question, SQL, result columns)
+    to enable conversational refinement.
+    """
+    from src.cli.session_state import clear_session_state
+
+    if clear_context:
+        clear_session_state()
+
+    # Interactive mode: loop until exit
+    if question is None:
+        console.print(
+            "[bold]Interactive mode:[/bold] Type your questions (exit/quit/q to leave)\n"
+        )
+        while True:
+            try:
+                user_input = input("❯ ").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[dim]Exiting...[/dim]")
+                break
+
+            if not user_input:
+                continue
+
+            # Check for exit keywords
+            if user_input.lower() in {"exit", "quit", "q"}:
+                console.print("[dim]Exiting...[/dim]")
+                break
+
+            # Process the question
+            _process_question(user_input, max_retries, verbose, insights)
+            console.print()  # Blank line between turns
+    else:
+        # Non-interactive mode: single question
+        _process_question(question, max_retries, verbose, insights)
+
+
+def _process_question(
+    question: str, max_retries: int, verbose: bool, insights: bool
+) -> None:
+    """Process a single question (used by both interactive and non-interactive modes)."""
     from src.config.vanna_config import get_vanna
+    from src.cli.session_state import (
+        load_session_state,
+        save_session_state,
+    )
 
     vn = get_vanna()
     vn.reset_llm_metrics()
     if vn.config is not None:
         vn.config["verbose"] = verbose
 
-    with console.status("Generating SQL..."):
-        sql = vn.generate_sql(question)
+    # Load conversation history (sliding window of max 5 turns)
+    turns = load_session_state()
+    enhanced_question = question
+    if turns:
+        # Build context from all available turns
+        context_lines = ["Conversation history:"]
+        for i, turn in enumerate(turns, 1):
+            q = turn.get("question", "")
+            sql = turn.get("sql", "")
+            cols = turn.get("columns", [])
+            context_lines.append(f"Turn {i}:")
+            context_lines.append(f"  Question: {q}")
+            context_lines.append(f"  SQL: {sql}")
+            context_lines.append(f"  Columns: {', '.join(cols)}")
 
-    sql, df, error = _execute_with_retry(vn, question, sql, max_retries=max_retries)
+        refinement_prompt = (
+            "\n".join(context_lines)
+            + f"\n\nNew question (may be a refinement or follow-up): {question}"
+        )
+        enhanced_question = refinement_prompt
+
+        if verbose:
+            console.print(
+                f"[dim]Using conversation history ({len(turns)} turn(s)) for context.[/dim]"
+            )
+
+    with console.status("Generating SQL..."):
+        sql = vn.generate_sql(enhanced_question)
+
+    sql, df, error = _execute_with_retry(
+        vn, enhanced_question, sql, max_retries=max_retries
+    )
 
     console.print("\n[bold]Generated SQL:[/bold]")
     console.print(sql)
@@ -188,13 +288,20 @@ def ask(question: str, max_retries: int, verbose: bool) -> None:
     if error is not None:
         console.print("\n[red]SQL execution failed.[/red]")
         console.print(str(error))
-        raise SystemExit(1)
+        # In interactive mode, don't exit on error - just continue
+        return
 
     _render_llm_metrics(vn, verbose=verbose)
     if verbose:
         _render_llm_debug(vn)
 
     _render_dataframe(df)
+    if insights:
+        _render_insights(vn, df, question, sql)
+
+    # Save current turn context for next ask
+    columns = list(df.columns) if df is not None and hasattr(df, "columns") else []
+    save_session_state(question, sql, columns)
 
 
 @cli.command()
@@ -284,6 +391,143 @@ def _render_dataframe(df) -> None:
     console.print(table)
     if len(display_df) > max_rows:
         console.print(f"\n[dim]Showing first {max_rows} rows.[/dim]")
+
+    # Auto-render bar chart for 2-column results
+    _render_bar_chart(df)
+
+
+def _render_bar_chart(df) -> None:
+    """Render horizontal bar chart for 2-column results (category + numeric)."""
+    if df is None or len(df.columns) != 2:
+        return
+
+    col1, col2 = df.columns[0], df.columns[1]
+
+    # Try to identify which column is numeric and which is categorical
+    numeric_col = None
+    category_col = None
+
+    # Check if col2 is numeric
+    try:
+        numeric_vals = pd.to_numeric(df[col2], errors="coerce")
+        if isinstance(numeric_vals, pd.Series) and numeric_vals.notna().sum() > 0:
+            numeric_col = col2
+            category_col = col1
+    except Exception:
+        pass
+
+    # If col2 is not numeric, try col1
+    if numeric_col is None:
+        try:
+            numeric_vals = pd.to_numeric(df[col1], errors="coerce")
+            if isinstance(numeric_vals, pd.Series) and numeric_vals.notna().sum() > 0:
+                numeric_col = col1
+                category_col = col2
+        except Exception:
+            pass
+
+    # If we couldn't identify numeric column, skip
+    if numeric_col is None or category_col is None:
+        return
+
+    # Filter out rows with None/NaN values
+    try:
+        chart_df = df[[category_col, numeric_col]].copy()
+        chart_df[numeric_col] = pd.to_numeric(chart_df[numeric_col], errors="coerce")
+        chart_df = chart_df.dropna()
+
+        if len(chart_df) == 0:
+            return
+
+        # Limit to 20 rows for readability
+        chart_df = chart_df.head(20)
+
+        # Find max value for scaling
+        max_val = chart_df[numeric_col].max()
+        if max_val <= 0:
+            return
+
+        console.print("[bold]Chart:[/bold]")
+
+        # Render horizontal bar chart (ASCII) with aligned columns
+        bar_width = 40
+        labels = [str(row[category_col]) for _, row in chart_df.iterrows()]
+        label_width = max((cell_len(label) for label in labels), default=0)
+
+        rows: list[tuple[str, str, int]] = []
+        for _, row in chart_df.iterrows():
+            label = str(row[category_col])
+            value = row[numeric_col]
+
+            # Skip None/NaN values
+            if pd.isna(value):
+                continue
+
+            try:
+                value = float(value)
+            except (ValueError, TypeError):
+                continue
+
+            # Calculate bar length
+            bar_len = int((value / max_val) * bar_width) if max_val > 0 else 0
+            bar_len = max(1, bar_len) if value > 0 else 0
+
+            # Format value for display
+            try:
+                if isinstance(value, float) and value == int(value):
+                    value_str = f"{int(value):,}"
+                else:
+                    value_str = f"{value:,.2f}".rstrip("0").rstrip(".")
+            except (ValueError, TypeError):
+                value_str = str(value)
+
+            rows.append((label, value_str, bar_len))
+
+        value_width = max((cell_len(value_str) for _, value_str, _ in rows), default=0)
+
+        for label, value_str, bar_len in rows:
+            # Build bar (ASCII)
+            bar = "#" * bar_len
+            pad = label_width - cell_len(label) + 2
+            label_padded = f"{label}{' ' * max(pad, 2)}"
+            value_pad = " " * max(value_width - cell_len(value_str), 0)
+            console.print(f"  {label_padded}{bar:<{bar_width}} {value_pad}{value_str}")
+
+    except Exception:
+        # Silently fail if chart rendering has issues
+        pass
+
+
+def _render_insights(vn, df, question: str, sql: str) -> None:
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return
+
+    try:
+        display_df = _format_currency_columns(df)
+        sample_df = display_df.head(20)
+        try:
+            table_text = sample_df.to_markdown(index=False)
+        except Exception:
+            table_text = sample_df.to_string(index=False)
+
+        system_prompt = (
+            "You are a data analyst. Provide 3-5 concise insights in Chinese. "
+            "Base only on the data shown. Avoid speculation and do not invent facts. "
+            "If the data is insufficient for insights, say so briefly."
+        )
+        user_prompt = (
+            f"Question: {question}\nSQL:\n{sql}\n\nData (top rows):\n{table_text}\n"
+        )
+
+        messages = [vn.system_message(system_prompt), vn.user_message(user_prompt)]
+        with console.status("Generating insights..."):
+            response = vn.submit_prompt(messages)
+        if response:
+            console.print("\n[bold]Insights:[/bold]")
+            cleaned = "\n".join(line for line in response.splitlines() if line.strip())
+            console.print(cleaned)
+    except Exception:
+        return
 
 
 def _format_currency_columns(df):

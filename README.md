@@ -37,9 +37,18 @@ Ask questions in natural language and query a MySQL database with Vanna AI.
    ```bash
    python -m src.cli.main train
    ```
-8. Ask:
+8. Ask (conversational by default):
    ```bash
+   # Interactive mode (no question argument - enter a loop)
+   python -m src.cli.main ask
+   # Type questions interactively, type 'exit', 'quit', or 'q' to leave
+   
+   # Non-interactive mode (single question)
    python -m src.cli.main ask "查询2025年全产品线的销售达成总金额"
+   # Follow-up questions automatically use previous context
+   python -m src.cli.main ask "只看前10名"
+   # Clear context to start fresh
+   python -m src.cli.main ask "新问题" --clear-context
    ```
 
 ### Maintenance (Schema Updates)
@@ -62,12 +71,23 @@ When database schema changes:
 
 If installed, you can use:
 ```bash
+# Interactive mode
+askdb ask
+
+# Non-interactive mode
 askdb ask "查询2025年全产品线的销售达成总金额"
 ```
 
 ## Commands
 
-- `ask` — generate SQL, validate, execute, and display results
+- `ask [QUESTION]` — generate SQL, validate, execute, and display results (conversational: uses previous turn context automatically)
+  - If QUESTION is omitted, enters **interactive loop mode** where you can ask multiple questions
+  - Type `exit`, `quit`, or `q` to leave interactive mode
+  - If QUESTION is provided, runs once and exits (non-interactive mode)
+  - `--clear-context` — start fresh without previous conversation context
+  - `--insights/--no-insights` — generate short LLM insights after results (default: on)
+  - `--max-retries` — retry SQL generation on errors (default: 1)
+  - `--verbose` — show LLM prompt/response details
 - `train` — train on schema + semantic store + examples
 - `dump-ddl` — dump raw DDL into `src/semantic/ddl_dump.json` (respects allowlist unless --force)
 - `init-semantic-store` — scaffold semantic_store.json from ddl_dump.json (optionally with --allowlist)
@@ -98,6 +118,45 @@ The `allowlist` in `semantic_store.json` controls which tables are:
 
 Use `dump-ddl --force` to dump all tables regardless of allowlist (useful for bootstrap).
 Use `init-semantic-store` to scaffold the semantic store from a full DDL dump.
+
+## Conversational Behavior
+
+The `ask` command automatically maintains conversation context between turns:
+- Maintains a sliding window of the last 5 turns (questions, SQL, result columns)
+- Each new question receives full context from all previous turns in the window
+- Follow-up questions like "只看前10名" or "按日期排序" work naturally
+- Context is stored in `chromadb_data/session_state.json` (git-ignored)
+- Use `--clear-context` flag to start a fresh conversation
+- Backward compatible: automatically converts old single-turn format to new multi-turn format
+
+### Interactive Mode
+
+Run `askdb ask` without a question to enter interactive loop mode:
+```bash
+askdb ask
+# Interactive mode: Type your questions (exit/quit/q to leave)
+❯ 查询2025年销售总额
+# ... results displayed ...
+❯ 只看前10名
+# ... refined results ...
+❯ 按金额降序排列
+# ... further refinement ...
+❯ exit
+```
+
+### Non-Interactive Mode
+
+Provide a question argument for single-shot execution:
+```bash
+# First question
+askdb ask "查询2025年销售总额"
+# Follow-up (uses previous SQL and columns)
+askdb ask "只看前10名"
+# Another refinement
+askdb ask "按金额降序排列"
+# Start fresh
+askdb ask "新问题" --clear-context
+```
 
 ## LLM Providers
 
@@ -144,6 +203,9 @@ SQLITE_PATH=/absolute/path/to/database.sqlite
 
 Currency columns are formatted in CLI output with thousands separators and no decimals.
 Heuristics include column names like: `amount`, `sales`, `revenue`, `price`, `total`, `tax`, `金额`, `销售额`, `含税`, `税额`.
+
+When results have exactly two columns (one category and one numeric), AskDB also prints a simple horizontal bar chart below the table.
+Insights are on by default; use `--no-insights` to disable them.
 
 ## Notes
 
