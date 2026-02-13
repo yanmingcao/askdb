@@ -1,0 +1,26 @@
+"""Database adapter interface."""
+
+from typing import Protocol, Any, Optional, Dict, List
+
+
+class DBAdapter(Protocol):
+    db_type: str
+    database_name: str
+
+    def test_connection(self) -> bool: ...
+
+    def execute_query(
+        self, query: str, params: Optional[tuple[Any, ...]] = None
+    ) -> List[Dict[str, Any]]: ...
+
+    def get_table_list(self) -> List[Dict[str, Any]]: ...
+
+    def get_table_schema(self, table_name: str) -> List[Dict[str, Any]]: ...
+
+    def get_table_indexes(self, table_name: str) -> List[Dict[str, Any]]: ...
+
+    def get_foreign_keys(self) -> List[Dict[str, Any]]: ...
+
+    def get_create_table_ddl(self, table_name: str) -> str: ...
+
+    def connect_vanna(self, vn: Any) -> None: ...
