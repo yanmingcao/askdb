@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "askdb"
+version = "0.1.0"
+description = "Natural language to MySQL query CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "vanna[chromadb,openai,mysql]>=2.0.2",
+  "mysql-connector-python>=9.0.0",
+  "python-dotenv>=1.0.0",
+  "PyMySQL>=1.1.0",
+  "click>=8.1.0",
+  "rich>=13.7.0",
+  "prompt_toolkit>=3.0.43",
+  "pandas>=2.1.0",
+  "tabulate>=0.9.0",
+  "openai>=1.10.0",
+  "chromadb>=1.1.0",
+  "sqlalchemy>=2.0.0",
+  "sqlparse>=0.4.4",
+  "numpy>=1.26.0",
+  "psycopg2-binary>=2.9.9",
+]
+
+[project.scripts]
+askdb = "src.cli.entry:main"
+
+[tool.setuptools]
+packages = ["src", "src.cli", "src.config", "src.query", "src.semantic", "src.training", "src.db"]
