@@ -191,6 +191,8 @@ askdb ask "新问题" --clear-context
       |        |
       v        |
   SQL Generation + Context Retrieval (ChromaDB)
+      |
+      |  LLM Call #1 (SQL generation)
       |        ^
       |        |
       v        |
@@ -200,7 +202,11 @@ askdb ask "新问题" --clear-context
   DB Adapter (src/db/*) ---> Target Database
       |
       v
-  Results -> Table/Chart/Insights
+  Results -> Table/Chart
+       |
+       |  LLM Call #2 (insights, optional)
+       v
+  Insights
 ```
 
 ## Key Technologies
