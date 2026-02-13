@@ -1,0 +1,46 @@
+{
+  "schema_prefix": "sales",
+  "allowlist": [
+    "master_brand",
+    "data_target",
+    "data_sales"
+  ],
+  "tables": {
+    "sales.master_brand": {
+      "id": 1,
+      "name": "master_brand",
+      "full_name": "sales.master_brand",
+      "table_type": "table",
+      "description": "Master table for brands",
+      "columns": {
+        "BrandCode": {
+          "id": 136,
+          "name": "BrandCode",
+          "full_name": "sales.master_brand.BrandCode",
+          "data_type": "STRING",
+          "description": "\"BrandCode=1\" is our company while other brand code means one of our competitors."
+        },
+        "BrandName": {
+          "id": 137,
+          "name": "BrandName",
+          "full_name": "sales.master_brand.BrandName",
+          "data_type": "STRING",
+          "description": "Brand name"
+        }
+      }
+    }
+  },
+  "notes": [
+    {
+      "title": "Terminology",
+      "text": "销售额=Sales Amount, 销售量=Sales Volume, 目标=Target, 实际完成=Actual, 产品=Product, 产品线=Product Line, 销售代表=Sales Rep, 区域=Region, 省份=Province, 城市=City"
+    }
+  ],
+  "examples": [
+    {
+      "question": "查询所有的品牌名称",
+      "sql": "SELECT BrandName\nFROM master_brand;",
+      "notes": ""
+    }
+  ]
+}

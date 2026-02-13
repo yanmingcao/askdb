@@ -233,8 +233,13 @@ def dump_ddl_to_file(path: str) -> int:
         if ddl:
             ddl_map[table_name] = ddl
 
+    schema_name = (
+        db_utils.db_config.database
+        or db_utils.db_config.sqlite_path
+        or db_utils.db_config.db_type
+    )
     payload = {
-        "schema": db_utils.db_config.database,
+        "schema": schema_name,
         "dumped_at": datetime.utcnow().isoformat() + "Z",
         "tables": ddl_map,
     }
