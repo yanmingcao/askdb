@@ -93,13 +93,57 @@ def reset_training(yes: bool) -> None:
 
 
 @cli.command("dump-ddl")
-def dump_ddl() -> None:
-    """Dump DB DDL to src/semantic/ddl_dump.json."""
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Dump all tables, ignoring allowlist in semantic_store.json.",
+)
+def dump_ddl(force: bool) -> None:
+    """Dump DB DDL to src/semantic/ddl_dump.json (respects allowlist unless --force)."""
     from src.training.schema_extractor import dump_ddl_to_file
 
     ddl_path = Path(__file__).resolve().parents[1] / "semantic" / "ddl_dump.json"
-    count = dump_ddl_to_file(str(ddl_path))
+    count = dump_ddl_to_file(str(ddl_path), force=force)
     console.print(f"[green]Dumped DDL for {count} table(s).[/green]")
+
+
+@cli.command("init-semantic-store")
+@click.option(
+    "--allowlist",
+    multiple=True,
+    help="Table names to include in allowlist (can be specified multiple times).",
+)
+def init_semantic_store(allowlist: tuple[str, ...]) -> None:
+    """Initialize semantic_store.json from ddl_dump.json.
+
+    Creates a scaffold semantic store with table/column structure from DDL dump.
+    Optionally specify --allowlist to filter tables (can be used multiple times).
+    If no allowlist is provided, all tables from ddl_dump.json are included.
+    """
+    from src.training.schema_extractor import init_semantic_store_from_ddl
+
+    ddl_path = Path(__file__).resolve().parents[1] / "semantic" / "ddl_dump.json"
+    store_path = (
+        Path(__file__).resolve().parents[1] / "semantic" / "semantic_store.json"
+    )
+
+    if not ddl_path.exists():
+        console.print(
+            "[red]ddl_dump.json not found. Run 'dump-ddl --force' first.[/red]"
+        )
+        raise SystemExit(1)
+
+    if store_path.exists():
+        console.print("[yellow]semantic_store.json already exists.[/yellow]")
+        if not click.confirm("Overwrite?"):
+            console.print("[dim]Aborted.[/dim]")
+            raise SystemExit(0)
+
+    allowlist_set = set(allowlist) if allowlist else None
+    count = init_semantic_store_from_ddl(str(ddl_path), str(store_path), allowlist_set)
+    console.print(
+        f"[green]Initialized semantic_store.json with {count} table(s).[/green]"
+    )
 
 
 @cli.command("semantic-tui")

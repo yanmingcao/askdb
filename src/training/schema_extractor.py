@@ -2,6 +2,7 @@
 
 import os
 import json
+import re
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
@@ -218,10 +219,174 @@ def train_vanna_on_semantic_examples(vn: Optional[AskDBVanna] = None) -> int:
     return count
 
 
-def dump_ddl_to_file(path: str) -> int:
-    """Dump DDL using SHOW CREATE TABLE into a JSON file."""
+def init_semantic_store_from_ddl(
+    ddl_path: str, store_path: str, allowlist: Optional[set[str]] = None
+) -> int:
+    """Initialize semantic_store.json from ddl_dump.json.
+
+    Args:
+        ddl_path: Path to ddl_dump.json
+        store_path: Path to semantic_store.json (will be created/overwritten)
+        allowlist: Optional set of table names to include
+
+    Returns:
+        Number of tables initialized
+    """
+    with open(ddl_path, "r", encoding="utf-8") as handle:
+        ddl_dump = json.load(handle)
+
+    schema_name = ddl_dump.get("schema", "")
+    tables_ddl = ddl_dump.get("tables", {})
+
+    if allowlist:
+        tables_ddl = {k: v for k, v in tables_ddl.items() if k in allowlist}
+
+    store: Dict[str, Any] = {
+        "schema_prefix": schema_name,
+        "allowlist": sorted(tables_ddl.keys()),
+        "tables": {},
+        "notes": [],
+        "examples": [],
+    }
+
+    column_id = 1
+    for table_name in sorted(tables_ddl.keys()):
+        full_name = f"{schema_name}.{table_name}" if schema_name else table_name
+        columns: Dict[str, Any] = {}
+        ddl = tables_ddl.get(table_name, "")
+        for col_name, col_type in _extract_columns_from_ddl(ddl):
+            col_full_name = f"{full_name}.{col_name}"
+            columns[col_name] = {
+                "id": column_id,
+                "name": col_name,
+                "full_name": col_full_name,
+                "data_type": col_type,
+                "description": "",
+            }
+            column_id += 1
+        store["tables"][full_name] = {
+            "id": len(store["tables"]) + 1,
+            "name": table_name,
+            "full_name": full_name,
+            "table_type": "table",
+            "description": "",
+            "columns": columns,
+        }
+
+    with open(store_path, "w", encoding="utf-8") as handle:
+        json.dump(store, handle, ensure_ascii=False, indent=2)
+
+    return len(store["tables"])
+
+
+def _split_ddl_columns(body: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for ch in body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth > 0:
+                depth -= 1
+        if ch == "," and depth == 0:
+            chunk = "".join(current).strip()
+            if chunk:
+                parts.append(chunk)
+            current = []
+            continue
+        current.append(ch)
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _extract_data_type(rest: str) -> str:
+    keywords = {
+        "not",
+        "null",
+        "default",
+        "primary",
+        "unique",
+        "references",
+        "constraint",
+        "check",
+        "collate",
+        "comment",
+        "key",
+        "generated",
+        "identity",
+        "auto_increment",
+        "autoincrement",
+        "on",
+        "using",
+    }
+    tokens = rest.split()
+    data_tokens: list[str] = []
+    for token in tokens:
+        if token.lower() in keywords:
+            break
+        data_tokens.append(token)
+    return " ".join(data_tokens).strip()
+
+
+def _extract_columns_from_ddl(ddl: str) -> list[tuple[str, str]]:
+    if not ddl:
+        return []
+    start = ddl.find("(")
+    end = ddl.rfind(")")
+    if start == -1 or end == -1 or end <= start:
+        return []
+    body = ddl[start + 1 : end]
+    chunks = _split_ddl_columns(body)
+    results: list[tuple[str, str]] = []
+    for chunk in chunks:
+        line = chunk.strip().rstrip(",")
+        if not line:
+            continue
+        lower = line.lower()
+        if lower.startswith(
+            (
+                "primary key",
+                "unique key",
+                "unique index",
+                "key ",
+                "index ",
+                "constraint ",
+                "foreign key",
+                "check ",
+            )
+        ):
+            continue
+
+        match = re.match(r"`([^`]+)`\s+(.*)", line)
+        if not match:
+            match = re.match(r"\"([^\"]+)\"\s+(.*)", line)
+        if not match:
+            match = re.match(r"([A-Za-z0-9_]+)\s+(.*)", line)
+        if not match:
+            continue
+
+        col_name = match.group(1).strip()
+        rest = match.group(2).strip()
+        data_type = _extract_data_type(rest)
+        if not col_name or not data_type:
+            continue
+        results.append((col_name, data_type))
+
+    return results
+
+
+def dump_ddl_to_file(path: str, force: bool = False) -> int:
+    """Dump DDL using SHOW CREATE TABLE into a JSON file.
+
+    Args:
+        path: Output file path for ddl_dump.json
+        force: If True, dump all tables ignoring allowlist
+    """
     db_utils = get_db_utils()
-    allowlist = get_table_allowlist()
+    allowlist = None if force else get_table_allowlist()
     tables = db_utils.get_table_list()
     if allowlist:
         tables = [t for t in tables if t["TABLE_NAME"] in allowlist]

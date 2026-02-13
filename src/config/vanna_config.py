@@ -188,7 +188,10 @@ def get_vanna_config() -> Dict[str, Any]:
 
 def get_table_allowlist() -> Optional[list[str]]:
     """Get table allowlist from semantic store. Returns None if empty (= all tables)."""
-    from src.semantic.store import load_semantic_store
+    from src.semantic.store import load_semantic_store, semantic_store_path
+
+    if not os.path.exists(semantic_store_path()):
+        return None
 
     store = load_semantic_store()
     allowlist = store.get("allowlist", [])
