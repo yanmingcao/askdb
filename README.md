@@ -285,3 +285,17 @@ Insights are on by default; use `--no-insights` to disable them.
 
 - Use `reset-training --yes` when you want to fully re-index semantic data.
 - Incremental training state is stored in `chromadb_data/training_state.json`.
+
+## Example Verification
+
+You can test the LLM's SQL generation capability by comparing generated SQL and results against stored examples:
+
+```bash
+python scripts/test_llm_sqlgen.py
+```
+
+Options:
+- `--limit N` to check a subset
+- `--index N` to check specific example(s) (1-based, repeatable)
+
+This script calls the LLM for each example and executes SQL, so it can be slow and consume tokens.
