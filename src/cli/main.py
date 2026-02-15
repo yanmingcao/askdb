@@ -1,7 +1,9 @@
 """AskDB CLI - Natural language to SQL query tool."""
 
 import re
+import shlex
 import shutil
+import threading
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 import click
@@ -33,16 +35,23 @@ def test_connection() -> None:
 
 
 @cli.command()
-def train() -> None:
+@click.option(
+    "--full",
+    is_flag=True,
+    help="Force full retrain (clears chromadb_data and retrains all).",
+)
+def train(full: bool) -> None:
     """Train Vanna on the database schema (respects allowlist in semantic_store)."""
     from src.training.schema_extractor import (
+        train_vanna_incremental,
+        reset_chromadb_data,
         train_vanna_on_schema,
         train_vanna_on_relationships,
         train_vanna_on_semantic_schema,
         train_vanna_on_semantic_notes,
         train_vanna_on_semantic_examples,
     )
-    from src.config.vanna_config import get_table_allowlist
+    from src.config.vanna_config import get_table_allowlist, vanna_lock
 
     allowlist = get_table_allowlist()
     if allowlist:
@@ -50,25 +59,62 @@ def train() -> None:
     else:
         console.print("[dim]No allowlist set — training on all tables.[/dim]")
 
-    with console.status("Extracting and training schema..."):
-        count = train_vanna_on_schema()
-    console.print(f"[green]Trained on {count} table(s).[/green]")
+    if full:
+        with vanna_lock():
+            with console.status("Clearing local training data..."):
+                reset_chromadb_data()
+            with console.status("Extracting and training schema..."):
+                schema_count = train_vanna_on_schema()
+            console.print(f"[green]Trained on {schema_count} table(s).[/green]")
 
-    with console.status("Training on foreign key relationships..."):
-        fk_count = train_vanna_on_relationships()
-    console.print(f"[green]Trained on {fk_count} relationship(s).[/green]")
+            with console.status("Training on foreign key relationships..."):
+                fk_count = train_vanna_on_relationships()
+            console.print(f"[green]Trained on {fk_count} relationship(s).[/green]")
 
-    with console.status("Training on semantic schema documentation..."):
-        doc_count = train_vanna_on_semantic_schema()
-    console.print(f"[green]Trained on {doc_count} semantic doc(s).[/green]")
+            with console.status("Training on semantic schema documentation..."):
+                doc_count = train_vanna_on_semantic_schema()
+            console.print(f"[green]Trained on {doc_count} semantic doc(s).[/green]")
 
-    with console.status("Training on semantic notes..."):
-        note_count = train_vanna_on_semantic_notes()
-    console.print(f"[green]Trained on {note_count} semantic note(s).[/green]")
+            with console.status("Training on semantic notes..."):
+                note_count = train_vanna_on_semantic_notes()
+            console.print(f"[green]Trained on {note_count} semantic note(s).[/green]")
 
-    with console.status("Training on semantic examples..."):
-        ex_count = train_vanna_on_semantic_examples()
-    console.print(f"[green]Trained on {ex_count} semantic example(s).[/green]")
+            with console.status("Training on semantic examples..."):
+                ex_count = train_vanna_on_semantic_examples()
+            console.print(f"[green]Trained on {ex_count} semantic example(s).[/green]")
+        return
+
+    with console.status("Training on changes..."):
+        result = train_vanna_incremental(sync=True)
+
+    mode = result.get("mode")
+    if mode == "full":
+        console.print(
+            "[yellow]Detected removals or allowlist changes. Full retrain performed.[/yellow]"
+        )
+        console.print(f"[green]Trained on {result.get('schema', 0)} table(s).[/green]")
+        console.print(
+            f"[green]Trained on {result.get('relationships', 0)} relationship(s).[/green]"
+        )
+        console.print(
+            f"[green]Trained on {result.get('semantic_docs', 0)} semantic doc(s).[/green]"
+        )
+        console.print(
+            f"[green]Trained on {result.get('notes', 0)} semantic note(s).[/green]"
+        )
+        console.print(
+            f"[green]Trained on {result.get('examples', 0)} semantic example(s).[/green]"
+        )
+    else:
+        console.print(
+            f"[green]Trained on {result.get('semantic_docs', 0)} semantic doc(s).[/green]"
+        )
+        console.print(
+            f"[green]Trained on {result.get('notes', 0)} semantic note(s).[/green]"
+        )
+        console.print(
+            f"[green]Trained on {result.get('examples', 0)} semantic example(s).[/green]"
+        )
 
 
 @cli.command("reset-training")
@@ -180,12 +226,18 @@ def semantic_tui() -> None:
     default=True,
     help="Generate short LLM insights after results.",
 )
+@click.option(
+    "--show-sql/--hide-sql",
+    default=True,
+    help="Show generated SQL in output.",
+)
 def ask(
     question: str | None,
     max_retries: int,
     verbose: bool,
     clear_context: bool,
     insights: bool,
+    show_sql: bool,
 ) -> None:
     """Ask a natural language question about your database.
 
@@ -211,6 +263,7 @@ def ask(
         console.print(
             "[bold]Interactive mode:[/bold] Type your questions (exit/quit/q to leave)\n"
         )
+        last_success: dict[str, str] | None = None
         while True:
             try:
                 user_input = input("❯ ").strip()
@@ -221,24 +274,34 @@ def ask(
             if not user_input:
                 continue
 
+            if user_input.startswith("/save"):
+                handled = _handle_save_command(user_input, last_success)
+                if handled:
+                    console.print()
+                    continue
+
             # Check for exit keywords
             if user_input.lower() in {"exit", "quit", "q"}:
                 console.print("[dim]Exiting...[/dim]")
                 break
 
             # Process the question
-            _process_question(user_input, max_retries, verbose, insights)
+            result = _process_question(
+                user_input, max_retries, verbose, insights, show_sql
+            )
+            if result:
+                last_success = result
             console.print()  # Blank line between turns
     else:
         # Non-interactive mode: single question
-        _process_question(question, max_retries, verbose, insights)
+        _process_question(question, max_retries, verbose, insights, show_sql)
 
 
 def _process_question(
-    question: str, max_retries: int, verbose: bool, insights: bool
-) -> None:
+    question: str, max_retries: int, verbose: bool, insights: bool, show_sql: bool
+) -> dict[str, str] | None:
     """Process a single question (used by both interactive and non-interactive modes)."""
-    from src.config.vanna_config import get_vanna
+    from src.config.vanna_config import get_vanna, vanna_lock
     from src.cli.session_state import (
         load_session_state,
         save_session_state,
@@ -275,33 +338,91 @@ def _process_question(
                 f"[dim]Using conversation history ({len(turns)} turn(s)) for context.[/dim]"
             )
 
-    with console.status("Generating SQL..."):
-        sql = vn.generate_sql(enhanced_question)
+    with vanna_lock():
+        with console.status("Generating SQL..."):
+            sql = vn.generate_sql(enhanced_question)
 
-    sql, df, error = _execute_with_retry(
-        vn, enhanced_question, sql, max_retries=max_retries
-    )
+        sql, df, error = _execute_with_retry(
+            vn, enhanced_question, sql, max_retries=max_retries
+        )
 
-    console.print("\n[bold]Generated SQL:[/bold]")
-    console.print(sql)
+    if show_sql:
+        console.print("\n[bold]Generated SQL:[/bold]")
+        console.print(sql)
 
     if error is not None:
         console.print("\n[red]SQL execution failed.[/red]")
         console.print(str(error))
         # In interactive mode, don't exit on error - just continue
-        return
+        return None
 
     _render_llm_metrics(vn, verbose=verbose)
     if verbose:
         _render_llm_debug(vn)
 
-    _render_dataframe(df)
-    if insights:
+    _render_dataframe(df, question=question)
+    if insights and df is not None and len(df) >= 4:
         _render_insights(vn, df, question, sql)
 
     # Save current turn context for next ask
     columns = list(df.columns) if df is not None and hasattr(df, "columns") else []
     save_session_state(question, sql, columns)
+    return {"question": question, "sql": sql}
+
+
+def _handle_save_command(command: str, last_success: dict[str, str] | None) -> bool:
+    if not command.startswith("/save"):
+        return False
+
+    if (
+        not last_success
+        or not last_success.get("question")
+        or not last_success.get("sql")
+    ):
+        console.print("[yellow]No successful query to save yet.[/yellow]")
+        return True
+
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        args = command.split()
+
+    notes_text = ""
+    if "--notes" in args:
+        idx = args.index("--notes")
+        if idx + 1 < len(args):
+            notes_text = args[idx + 1].strip()
+        else:
+            notes_text = input("Notes (optional): ").strip()
+
+    from src.semantic.store import load_semantic_store, save_semantic_store
+    from src.training.schema_extractor import train_vanna_incremental
+    from src.config.vanna_config import vanna_lock
+
+    store = load_semantic_store()
+    examples = store.get("examples", [])
+    question = last_success["question"].strip()
+    sql = last_success["sql"].strip()
+
+    for entry in examples:
+        if entry.get("question") == question and entry.get("sql") == sql:
+            console.print("[yellow]Example already exists.[/yellow]")
+            return True
+
+    examples.append({"question": question, "sql": sql, "notes": notes_text})
+    store["examples"] = examples
+    save_semantic_store(store)
+    console.print("[green]Saved example to semantic_store.json.[/green]")
+
+    def _train_background() -> None:
+        with vanna_lock():
+            result = train_vanna_incremental(sync=True)
+        _ = result
+
+    thread = threading.Thread(target=_train_background, daemon=True)
+    thread.start()
+    console.print("[dim]Background training started.[/dim]")
+    return True
 
 
 @cli.command()
@@ -365,7 +486,7 @@ def _execute_with_retry(vn, question: str, sql: str, max_retries: int):
                 sql = vn.generate_sql(repair_prompt)
 
 
-def _render_dataframe(df) -> None:
+def _render_dataframe(df, question: str | None = None) -> None:
     if df is None:
         console.print("\n[dim]No results returned.[/dim]")
         return
@@ -375,6 +496,22 @@ def _render_dataframe(df) -> None:
         return
 
     display_df = _format_currency_columns(df)
+
+    if len(display_df) == 1:
+        row = display_df.iloc[0].tolist()
+        values = ["" if v is None else str(v) for v in row]
+        answer = None
+        if question:
+            for value in values:
+                if value and value not in question:
+                    answer = value
+                    break
+        if answer is None and values:
+            answer = values[0]
+        if answer:
+            console.print(f"\n{answer}")
+            return
+
     table = Table(show_header=True, header_style="bold")
     columns = list(display_df.columns)
     for col in columns:

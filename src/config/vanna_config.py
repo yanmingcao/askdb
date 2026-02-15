@@ -3,6 +3,8 @@
 
 import os
 import time
+from contextlib import contextmanager
+from threading import Lock
 from typing import Optional, Dict, Any, List
 
 from dotenv import load_dotenv
@@ -213,6 +215,7 @@ def create_vanna_instance() -> AskDBVanna:
 
 
 _vanna_instance: Optional[AskDBVanna] = None
+_vanna_lock = Lock()
 
 
 def get_vanna() -> AskDBVanna:
@@ -221,3 +224,12 @@ def get_vanna() -> AskDBVanna:
     if _vanna_instance is None:
         _vanna_instance = create_vanna_instance()
     return _vanna_instance
+
+
+@contextmanager
+def vanna_lock():
+    _vanna_lock.acquire()
+    try:
+        yield
+    finally:
+        _vanna_lock.release()
