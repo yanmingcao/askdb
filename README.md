@@ -86,9 +86,11 @@ askdb ask "查询2025年全产品线的销售达成总金额"
   - If QUESTION is provided, runs once and exits (non-interactive mode)
   - `--clear-context` — start fresh without previous conversation context
   - `--insights/--no-insights` — generate short LLM insights after results (default: on)
+  - `--show-sql/--hide-sql` — show or hide generated SQL output (default: show)
   - `--max-retries` — retry SQL generation on errors (default: 1)
   - `--verbose` — show LLM prompt/response details
-- `train` — train on schema + semantic store + examples
+- `train` — incremental training on semantic store changes (auto full retrain if deletions/allowlist changes detected)
+  - `--full` — clear local training data and retrain everything
 - `dump-ddl` — dump raw DDL into `src/semantic/ddl_dump.json` (respects allowlist unless --force)
 - `init-semantic-store` — scaffold semantic_store.json from ddl_dump.json (optionally with --allowlist)
 - `semantic-tui` — edit semantic store (tables/columns/notes/examples)
@@ -107,7 +109,7 @@ This includes:
 - `examples` (question → SQL)
 - `allowlist` (tables to include in training and SQL generation)
 
-Excluded columns are skipped when building semantic docs to reduce noise.
+Excluded columns are skipped when building semantic docs and DDL training to reduce noise.
 
 ### Allowlist Behavior
 
@@ -128,6 +130,7 @@ The `ask` command automatically maintains conversation context between turns:
 - Context is stored in `chromadb_data/session_state.json` (git-ignored)
 - Use `--clear-context` flag to start a fresh conversation
 - Backward compatible: automatically converts old single-turn format to new multi-turn format
+- Use `/save --notes` in interactive mode to save the last successful question+SQL as an example (triggers background incremental training)
 
 ### Interactive Mode
 
@@ -281,3 +284,4 @@ Insights are on by default; use `--no-insights` to disable them.
 ## Notes
 
 - Use `reset-training --yes` when you want to fully re-index semantic data.
+- Incremental training state is stored in `chromadb_data/training_state.json`.
