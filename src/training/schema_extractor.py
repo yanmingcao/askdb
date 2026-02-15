@@ -11,19 +11,66 @@ from src.semantic.store import (
     save_semantic_store,
     semantic_store_path,
 )
+from src.training.training_state import (
+    load_training_state,
+    save_training_state,
+    reset_chromadb_data,
+    hash_text,
+)
 
 from src.config.database import get_db_utils
 from src.config.vanna_config import get_vanna, get_table_allowlist, AskDBVanna
 
 
+def _get_excluded_columns(table_name: str) -> set[str]:
+    """Get set of excluded column names for a table from semantic_store.
+
+    Returns empty set if table not in semantic_store or has no excluded columns.
+    """
+    try:
+        store = load_semantic_store()
+        tables = store.get("tables", {})
+
+        # Try exact match first, then try with schema prefix
+        table_info = None
+        for full_name, info in tables.items():
+            if full_name.endswith(f".{table_name}") or full_name == table_name:
+                table_info = info
+                break
+
+        if not table_info:
+            return set()
+
+        excluded = set()
+        columns = table_info.get("columns", {})
+        for col_name, col_info in columns.items():
+            if col_info.get("excluded") is True:
+                excluded.add(col_name)
+
+        return excluded
+    except Exception:
+        # If semantic store doesn't exist or has issues, return empty set
+        return set()
+
+
 def extract_ddl_for_table(table_name: str) -> str:
-    """Generate CREATE TABLE DDL from INFORMATION_SCHEMA metadata."""
+    """Generate CREATE TABLE DDL from INFORMATION_SCHEMA metadata.
+
+    Excludes columns marked as excluded in semantic_store.
+    """
     db_utils = get_db_utils()
     columns = db_utils.get_table_schema(table_name)
+    excluded_cols = _get_excluded_columns(table_name)
 
     col_defs: list[str] = []
     for col in columns:
-        parts = [f"  `{col['COLUMN_NAME']}` {col['DATA_TYPE']}"]
+        col_name = col["COLUMN_NAME"]
+
+        # Skip excluded columns
+        if col_name in excluded_cols:
+            continue
+
+        parts = [f"  `{col_name}` {col['DATA_TYPE']}"]
 
         max_len = col.get("CHARACTER_MAXIMUM_LENGTH")
         if max_len is not None:
@@ -163,6 +210,40 @@ def _build_semantic_docs(
     return docs
 
 
+def _build_semantic_docs_map(
+    store: Dict[str, Any], allowlist: Optional[List[str]]
+) -> Dict[str, str]:
+    docs: Dict[str, str] = {}
+    tables = store.get("tables", {})
+
+    for table_full_name, table_info in tables.items():
+        if not _table_in_allowlist(table_full_name, allowlist):
+            continue
+
+        description = table_info.get("description", "")
+        header = f"Table {table_full_name}"
+        if description:
+            header += f": {description}"
+
+        lines = [header, "Columns:"]
+        columns = table_info.get("columns", {})
+        for col_name, col_info in columns.items():
+            if col_info.get("excluded") is True:
+                continue
+            col_desc = col_info.get("description", "")
+            col_type = col_info.get("data_type", "")
+            col_line = f"- {col_name}"
+            if col_type:
+                col_line += f" ({col_type})"
+            if col_desc:
+                col_line += f": {col_desc}"
+            lines.append(col_line)
+
+        docs[table_full_name] = "\n".join(lines)
+
+    return docs
+
+
 def train_vanna_on_semantic_schema(vn: Optional[AskDBVanna] = None) -> int:
     """Train Vanna on semantic schema documentation from JSON."""
     if vn is None:
@@ -170,12 +251,12 @@ def train_vanna_on_semantic_schema(vn: Optional[AskDBVanna] = None) -> int:
 
     allowlist = get_table_allowlist()
     store = load_semantic_store()
-    docs = _build_semantic_docs(store, allowlist)
+    docs_map = _build_semantic_docs_map(store, allowlist)
 
-    for doc in docs:
+    for doc in docs_map.values():
         vn.train(documentation=doc)
 
-    return len(docs)
+    return len(docs_map)
 
 
 def train_vanna_on_semantic_notes(vn: Optional[AskDBVanna] = None) -> int:
@@ -217,6 +298,134 @@ def train_vanna_on_semantic_examples(vn: Optional[AskDBVanna] = None) -> int:
         count += 1
 
     return count
+
+
+def _compute_semantic_items() -> Dict[str, Dict[str, Any]]:
+    allowlist = get_table_allowlist() or []
+    store = load_semantic_store()
+    items: Dict[str, Dict[str, Any]] = {}
+
+    allowlist_hash = hash_text(
+        json.dumps(sorted(allowlist), ensure_ascii=False, separators=(",", ":"))
+    )
+    items["allowlist"] = {
+        "type": "allowlist",
+        "hash": allowlist_hash,
+    }
+
+    docs_map = _build_semantic_docs_map(store, allowlist)
+    for table_full_name, doc in docs_map.items():
+        item_id = f"schema_doc:{table_full_name}"
+        items[item_id] = {
+            "type": "schema_doc",
+            "hash": hash_text(doc),
+            "payload": doc,
+        }
+
+    notes = store.get("notes", [])
+    for idx, entry in enumerate(notes):
+        title = str(entry.get("title", "")).strip()
+        text = str(entry.get("text", "")).strip()
+        if not title and not text:
+            continue
+        note_id = f"note:{title}" if title else f"note:{idx}"
+        content = f"{title}\n{text}".strip()
+        items[note_id] = {
+            "type": "note",
+            "hash": hash_text(content),
+            "payload": content,
+        }
+
+    examples = store.get("examples", [])
+    for idx, entry in enumerate(examples):
+        question = str(entry.get("question", "")).strip()
+        sql = str(entry.get("sql", "")).strip()
+        notes_text = str(entry.get("notes", "")).strip()
+        if not question or not sql:
+            continue
+        example_id = f"example:{question}" if question else f"example:{idx}"
+        content = f"{question}\n{sql}\n{notes_text}".strip()
+        items[example_id] = {
+            "type": "example",
+            "hash": hash_text(content),
+            "payload": {"question": question, "sql": sql},
+        }
+
+    return items
+
+
+def _diff_training_state(
+    state_items: Dict[str, Dict[str, Any]],
+    current_items: Dict[str, Dict[str, Any]],
+) -> tuple[Dict[str, Dict[str, Any]], list[str]]:
+    changed: Dict[str, Dict[str, Any]] = {}
+    for item_id, item in current_items.items():
+        prev = state_items.get(item_id, {})
+        if prev.get("hash") != item.get("hash"):
+            changed[item_id] = item
+
+    removed = [item_id for item_id in state_items if item_id not in current_items]
+    return changed, removed
+
+
+def train_vanna_incremental(sync: bool = True) -> Dict[str, Any]:
+    """Incremental train on semantic store changes with deletion sync.
+
+    Returns a dict with mode and counts.
+    """
+    state = load_training_state()
+    state_items = state.get("items", {}) if isinstance(state, dict) else {}
+    current_items = _compute_semantic_items()
+
+    changed, removed = _diff_training_state(state_items, current_items)
+    allowlist_changed = "allowlist" in changed or (
+        "allowlist" in state_items and "allowlist" not in current_items
+    )
+
+    if sync and (removed or allowlist_changed):
+        reset_chromadb_data()
+        schema_count = train_vanna_on_schema()
+        fk_count = train_vanna_on_relationships()
+        doc_count = train_vanna_on_semantic_schema()
+        note_count = train_vanna_on_semantic_notes()
+        ex_count = train_vanna_on_semantic_examples()
+        save_training_state(current_items)
+        return {
+            "mode": "full",
+            "schema": schema_count,
+            "relationships": fk_count,
+            "semantic_docs": doc_count,
+            "notes": note_count,
+            "examples": ex_count,
+        }
+
+    doc_count = 0
+    note_count = 0
+    ex_count = 0
+    vn = get_vanna()
+    for item in changed.values():
+        item_type = item.get("type")
+        if item_type == "schema_doc":
+            vn.train(documentation=item.get("payload", ""))
+            doc_count += 1
+        elif item_type == "note":
+            vn.train(documentation=item.get("payload", ""))
+            note_count += 1
+        elif item_type == "example":
+            payload = item.get("payload", {})
+            question = str(payload.get("question", "")).strip()
+            sql = str(payload.get("sql", "")).strip()
+            if question and sql:
+                vn.train(question=question, sql=sql)
+                ex_count += 1
+
+    save_training_state(current_items)
+    return {
+        "mode": "incremental",
+        "semantic_docs": doc_count,
+        "notes": note_count,
+        "examples": ex_count,
+    }
 
 
 def init_semantic_store_from_ddl(
