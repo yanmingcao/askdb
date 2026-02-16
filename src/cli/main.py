@@ -41,7 +41,7 @@ def test_connection() -> None:
     help="Force full retrain (clears chromadb_data and retrains all).",
 )
 def train(full: bool) -> None:
-    """Train Vanna on the database schema (respects allowlist in semantic_store)."""
+    """Train Vanna on ddl_dump.json and semantic metadata (respects allowlist)."""
     from src.training.schema_extractor import (
         train_vanna_incremental,
         reset_chromadb_data,
@@ -51,21 +51,37 @@ def train(full: bool) -> None:
         train_vanna_on_semantic_notes,
         train_vanna_on_semantic_examples,
     )
-    from src.config.vanna_config import get_table_allowlist, vanna_lock
+    from src.config.vanna_config import (
+        get_table_allowlist,
+        get_view_allowlist,
+        vanna_lock,
+    )
 
-    allowlist = get_table_allowlist()
-    if allowlist:
-        console.print(f"[dim]Allowlist: {', '.join(allowlist)}[/dim]")
+    table_allowlist = get_table_allowlist()
+    view_allowlist = get_view_allowlist()
+    if table_allowlist is None and view_allowlist is None:
+        console.print("[dim]No allowlist set — training on all tables and views.[/dim]")
     else:
-        console.print("[dim]No allowlist set — training on all tables.[/dim]")
+        table_label = "<all>" if table_allowlist is None else ", ".join(table_allowlist)
+        view_label = "<all>" if view_allowlist is None else ", ".join(view_allowlist)
+        if table_label == "":
+            table_label = "<none>"
+        if view_label == "":
+            view_label = "<none>"
+        console.print(
+            f"[dim]Allowlist tables: {table_label}[/dim]\n"
+            f"[dim]Allowlist views: {view_label}[/dim]"
+        )
 
     if full:
         with vanna_lock():
             with console.status("Clearing local training data..."):
                 reset_chromadb_data()
             with console.status("Extracting and training schema..."):
-                schema_count = train_vanna_on_schema()
-            console.print(f"[green]Trained on {schema_count} table(s).[/green]")
+                table_count, view_count = train_vanna_on_schema()
+            console.print(
+                f"[green]Trained on {table_count} table(s) and {view_count} view(s).[/green]"
+            )
 
             with console.status("Training on foreign key relationships..."):
                 fk_count = train_vanna_on_relationships()
@@ -73,7 +89,9 @@ def train(full: bool) -> None:
 
             with console.status("Training on semantic schema documentation..."):
                 doc_count = train_vanna_on_semantic_schema()
-            console.print(f"[green]Trained on {doc_count} semantic doc(s).[/green]")
+            console.print(
+                f"[green]Trained on {doc_count} semantic table/view metadata entries.[/green]"
+            )
 
             with console.status("Training on semantic notes..."):
                 note_count = train_vanna_on_semantic_notes()
@@ -92,12 +110,16 @@ def train(full: bool) -> None:
         console.print(
             "[yellow]Detected removals or allowlist changes. Full retrain performed.[/yellow]"
         )
-        console.print(f"[green]Trained on {result.get('schema', 0)} table(s).[/green]")
+        console.print(
+            f"[green]Trained on {result.get('schema_tables', 0)} table(s) and "
+            f"{result.get('schema_views', 0)} view(s).[/green]"
+        )
         console.print(
             f"[green]Trained on {result.get('relationships', 0)} relationship(s).[/green]"
         )
         console.print(
-            f"[green]Trained on {result.get('semantic_docs', 0)} semantic doc(s).[/green]"
+            "[green]Trained on "
+            f"{result.get('semantic_docs', 0)} semantic table/view metadata entries.[/green]"
         )
         console.print(
             f"[green]Trained on {result.get('notes', 0)} semantic note(s).[/green]"
@@ -144,15 +166,17 @@ def reset_training(yes: bool) -> None:
 @click.option(
     "--force",
     is_flag=True,
-    help="Dump all tables, ignoring allowlist in semantic_store.json.",
+    help="Dump all tables and views, ignoring allowlist in semantic_store.json.",
 )
 def dump_ddl(force: bool) -> None:
     """Dump DB DDL to src/semantic/ddl_dump.json (respects allowlist unless --force)."""
     from src.training.schema_extractor import dump_ddl_to_file
 
     ddl_path = Path(__file__).resolve().parents[1] / "semantic" / "ddl_dump.json"
-    count = dump_ddl_to_file(str(ddl_path), force=force)
-    console.print(f"[green]Dumped DDL for {count} table(s).[/green]")
+    table_count, view_count = dump_ddl_to_file(str(ddl_path), force=force)
+    console.print(
+        f"[green]Dumped DDL for {table_count} table(s) and {view_count} view(s).[/green]"
+    )
 
 
 @cli.command("init-semantic-store")
@@ -264,6 +288,7 @@ def ask(
             "[bold]Interactive mode:[/bold] Type your questions (exit/quit/q to leave)\n"
         )
         last_success: dict[str, str] | None = None
+        pending_examples: list[dict[str, str]] = []
         while True:
             try:
                 user_input = input("❯ ").strip()
@@ -275,7 +300,9 @@ def ask(
                 continue
 
             if user_input.startswith("/save"):
-                handled = _handle_save_command(user_input, last_success)
+                handled = _handle_save_command(
+                    user_input, last_success, pending_examples
+                )
                 if handled:
                     console.print()
                     continue
@@ -292,6 +319,15 @@ def ask(
             if result:
                 last_success = result
             console.print()  # Blank line between turns
+        if pending_examples:
+            from src.training.schema_extractor import train_vanna_incremental
+            from src.config.vanna_config import vanna_lock
+
+            with vanna_lock():
+                result = train_vanna_incremental(sync=False)
+            console.print(
+                f"[dim]Trained on {result.get('examples', 0)} new example(s).[/dim]"
+            )
     else:
         # Non-interactive mode: single question
         _process_question(question, max_retries, verbose, insights, show_sql)
@@ -370,7 +406,11 @@ def _process_question(
     return {"question": question, "sql": sql}
 
 
-def _handle_save_command(command: str, last_success: dict[str, str] | None) -> bool:
+def _handle_save_command(
+    command: str,
+    last_success: dict[str, str] | None,
+    pending_examples: list[dict[str, str]],
+) -> bool:
     if not command.startswith("/save"):
         return False
 
@@ -396,8 +436,6 @@ def _handle_save_command(command: str, last_success: dict[str, str] | None) -> b
             notes_text = input("Notes (optional): ").strip()
 
     from src.semantic.store import load_semantic_store, save_semantic_store
-    from src.training.schema_extractor import train_vanna_incremental
-    from src.config.vanna_config import vanna_lock
 
     store = load_semantic_store()
     examples = store.get("examples", [])
@@ -413,15 +451,8 @@ def _handle_save_command(command: str, last_success: dict[str, str] | None) -> b
     store["examples"] = examples
     save_semantic_store(store)
     console.print("[green]Saved example to semantic_store.json.[/green]")
-
-    def _train_background() -> None:
-        with vanna_lock():
-            result = train_vanna_incremental(sync=True)
-        _ = result
-
-    thread = threading.Thread(target=_train_background, daemon=True)
-    thread.start()
-    console.print("[dim]Background training started.[/dim]")
+    pending_examples.append({"question": question, "sql": sql})
+    console.print("[dim]Queued example for training at exit.[/dim]")
     return True
 
 
