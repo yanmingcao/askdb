@@ -3,6 +3,7 @@
 import os
 import json
 import re
+from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
@@ -19,7 +20,12 @@ from src.training.training_state import (
 )
 
 from src.config.database import get_db_utils
-from src.config.vanna_config import get_vanna, get_table_allowlist, AskDBVanna
+from src.config.vanna_config import (
+    get_vanna,
+    get_table_allowlist,
+    get_view_allowlist,
+    AskDBVanna,
+)
 
 
 def _get_excluded_columns(table_name: str) -> set[str]:
@@ -98,12 +104,37 @@ def extract_ddl_for_table(table_name: str) -> str:
     return ddl
 
 
+def extract_ddl_for_view(view_name: str) -> str:
+    """Generate a view DDL stub using exposed column names/types.
+
+    This avoids training on underlying view SQL definitions.
+    """
+    db_utils = get_db_utils()
+    columns = db_utils.get_table_schema(view_name)
+
+    col_defs: list[str] = []
+    for col in columns:
+        col_name = col["COLUMN_NAME"]
+        parts = [f"  `{col_name}` {col['DATA_TYPE']}"]
+
+        max_len = col.get("CHARACTER_MAXIMUM_LENGTH")
+        if max_len is not None:
+            parts.append(f"({max_len})")
+
+        col_defs.append("".join(parts))
+
+    ddl = f"CREATE VIEW `{view_name}` (\n"
+    ddl += ",\n".join(col_defs)
+    ddl += "\n);"
+    return ddl
+
+
 def extract_all_ddl(allowlist: Optional[List[str]] = None) -> List[str]:
     """Extract DDL for tables. Filters by allowlist if provided."""
     db_utils = get_db_utils()
     tables = db_utils.get_table_list()
 
-    if allowlist:
+    if allowlist is not None:
         tables = [t for t in tables if t["TABLE_NAME"] in allowlist]
 
     ddl_statements: list[str] = []
@@ -114,18 +145,45 @@ def extract_all_ddl(allowlist: Optional[List[str]] = None) -> List[str]:
     return ddl_statements
 
 
-def train_vanna_on_schema(vn: Optional[AskDBVanna] = None) -> int:
-    """Extract DDL and train Vanna. Returns count of trained tables."""
+def _load_ddl_dump() -> Dict[str, Any]:
+    ddl_path = Path(__file__).resolve().parents[1] / "semantic" / "ddl_dump.json"
+    if not ddl_path.exists():
+        raise FileNotFoundError("ddl_dump.json not found. Run 'dump-ddl' first.")
+    with ddl_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _filter_ddl_map(
+    ddl_map: Dict[str, Any], allowlist: Optional[List[str]]
+) -> Dict[str, Any]:
+    if allowlist is None:
+        return dict(ddl_map)
+    if not allowlist:
+        return {}
+    return {k: v for k, v in ddl_map.items() if k in allowlist}
+
+
+def train_vanna_on_schema(vn: Optional[AskDBVanna] = None) -> tuple[int, int]:
+    """Train Vanna on DDL from ddl_dump.json. Returns (table_count, view_count)."""
     if vn is None:
         vn = get_vanna()
 
-    allowlist = get_table_allowlist()
-    ddl_statements = extract_all_ddl(allowlist=allowlist)
+    ddl_dump = _load_ddl_dump()
+    table_allowlist = get_table_allowlist()
+    view_allowlist = get_view_allowlist()
+    tables_ddl = _filter_ddl_map(ddl_dump.get("tables", {}), table_allowlist)
+    views_ddl = _filter_ddl_map(ddl_dump.get("views", {}), view_allowlist)
+
+    ddl_statements: list[str] = []
+    for name in sorted(tables_ddl.keys()):
+        ddl_statements.append(tables_ddl[name])
+    for name in sorted(views_ddl.keys()):
+        ddl_statements.append(views_ddl[name])
 
     for ddl in ddl_statements:
         vn.train(ddl=ddl)
 
-    return len(ddl_statements)
+    return len(tables_ddl), len(views_ddl)
 
 
 def train_vanna_on_relationships(vn: Optional[AskDBVanna] = None) -> int:
@@ -133,27 +191,34 @@ def train_vanna_on_relationships(vn: Optional[AskDBVanna] = None) -> int:
     if vn is None:
         vn = get_vanna()
 
-    db_utils = get_db_utils()
-    fks = db_utils.get_foreign_keys()
+    ddl_dump = _load_ddl_dump()
+    relationships = ddl_dump.get("relationships", [])
+    if not isinstance(relationships, list):
+        relationships = []
 
     allowlist = get_table_allowlist()
-    if allowlist:
-        fks = [
+    if allowlist is not None:
+        relationships = [
             fk
-            for fk in fks
-            if fk["TABLE_NAME"] in allowlist or fk["REFERENCED_TABLE_NAME"] in allowlist
+            for fk in relationships
+            if fk.get("TABLE_NAME") in allowlist
+            or fk.get("REFERENCED_TABLE_NAME") in allowlist
         ]
 
-    if fks:
+    if relationships:
         doc = "Foreign key relationships:\n"
-        for fk in fks:
-            doc += (
-                f"- {fk['TABLE_NAME']}.{fk['COLUMN_NAME']} -> "
-                f"{fk['REFERENCED_TABLE_NAME']}.{fk['REFERENCED_COLUMN_NAME']}\n"
-            )
-        vn.train(documentation=doc)
+        for fk in relationships:
+            table_name = fk.get("TABLE_NAME", "")
+            column_name = fk.get("COLUMN_NAME", "")
+            ref_table = fk.get("REFERENCED_TABLE_NAME", "")
+            ref_column = fk.get("REFERENCED_COLUMN_NAME", "")
+            if not table_name or not column_name or not ref_table or not ref_column:
+                continue
+            doc += f"- {table_name}.{column_name} -> {ref_table}.{ref_column}\n"
+        if doc.strip() != "Foreign key relationships:":
+            vn.train(documentation=doc)
 
-    return len(fks)
+    return len(relationships)
 
 
 def append_semantic_note(title: str, text: str) -> None:
@@ -176,6 +241,13 @@ def _table_in_allowlist(table_full_name: str, allowlist: Optional[List[str]]) ->
     return raw_table in allowlist
 
 
+def _view_in_allowlist(view_full_name: str, allowlist: Optional[List[str]]) -> bool:
+    if not allowlist:
+        return True
+    raw_view = view_full_name.split(".")[-1]
+    return raw_view in allowlist
+
+
 def _build_semantic_docs(
     store: Dict[str, Any], allowlist: Optional[List[str]]
 ) -> List[str]:
@@ -193,6 +265,34 @@ def _build_semantic_docs(
 
         lines = [header, "Columns:"]
         columns = table_info.get("columns", {})
+        for col_name, col_info in columns.items():
+            if col_info.get("excluded") is True:
+                continue
+            col_desc = col_info.get("description", "")
+            col_type = col_info.get("data_type", "")
+            col_line = f"- {col_name}"
+            if col_type:
+                col_line += f" ({col_type})"
+            if col_desc:
+                col_line += f": {col_desc}"
+            lines.append(col_line)
+
+        docs.append("\n".join(lines))
+
+    view_allowlist = get_view_allowlist()
+    views = store.get("views", {})
+
+    for view_full_name, view_info in views.items():
+        if not _view_in_allowlist(view_full_name, view_allowlist):
+            continue
+
+        description = view_info.get("description", "")
+        header = f"View {view_full_name}"
+        if description:
+            header += f": {description}"
+
+        lines = [header, "Columns:"]
+        columns = view_info.get("columns", {})
         for col_name, col_info in columns.items():
             if col_info.get("excluded") is True:
                 continue
@@ -240,6 +340,34 @@ def _build_semantic_docs_map(
             lines.append(col_line)
 
         docs[table_full_name] = "\n".join(lines)
+
+    view_allowlist = get_view_allowlist()
+    views = store.get("views", {})
+
+    for view_full_name, view_info in views.items():
+        if not _view_in_allowlist(view_full_name, view_allowlist):
+            continue
+
+        description = view_info.get("description", "")
+        header = f"View {view_full_name}"
+        if description:
+            header += f": {description}"
+
+        lines = [header, "Columns:"]
+        columns = view_info.get("columns", {})
+        for col_name, col_info in columns.items():
+            if col_info.get("excluded") is True:
+                continue
+            col_desc = col_info.get("description", "")
+            col_type = col_info.get("data_type", "")
+            col_line = f"- {col_name}"
+            if col_type:
+                col_line += f" ({col_type})"
+            if col_desc:
+                col_line += f": {col_desc}"
+            lines.append(col_line)
+
+        docs[view_full_name] = "\n".join(lines)
 
     return docs
 
@@ -302,11 +430,19 @@ def train_vanna_on_semantic_examples(vn: Optional[AskDBVanna] = None) -> int:
 
 def _compute_semantic_items() -> Dict[str, Dict[str, Any]]:
     allowlist = get_table_allowlist() or []
+    view_allowlist = get_view_allowlist() or []
     store = load_semantic_store()
     items: Dict[str, Dict[str, Any]] = {}
 
     allowlist_hash = hash_text(
-        json.dumps(sorted(allowlist), ensure_ascii=False, separators=(",", ":"))
+        json.dumps(
+            {
+                "tables": sorted(allowlist),
+                "views": sorted(view_allowlist),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     )
     items["allowlist"] = {
         "type": "allowlist",
@@ -368,7 +504,9 @@ def _diff_training_state(
     return changed, removed
 
 
-def train_vanna_incremental(sync: bool = True) -> Dict[str, Any]:
+def train_vanna_incremental(
+    sync: bool = True, allow_reset_failure: bool = False
+) -> Dict[str, Any]:
     """Incremental train on semantic store changes with deletion sync.
 
     Returns a dict with mode and counts.
@@ -383,8 +521,22 @@ def train_vanna_incremental(sync: bool = True) -> Dict[str, Any]:
     )
 
     if sync and (removed or allowlist_changed):
-        reset_chromadb_data()
-        schema_count = train_vanna_on_schema()
+        try:
+            reset_chromadb_data()
+        except PermissionError:
+            if not allow_reset_failure:
+                raise
+            return {
+                "mode": "deferred",
+                "reason": "chromadb_data_in_use",
+                "schema_tables": 0,
+                "schema_views": 0,
+                "relationships": 0,
+                "semantic_docs": 0,
+                "notes": 0,
+                "examples": 0,
+            }
+        table_count, view_count = train_vanna_on_schema()
         fk_count = train_vanna_on_relationships()
         doc_count = train_vanna_on_semantic_schema()
         note_count = train_vanna_on_semantic_notes()
@@ -392,7 +544,8 @@ def train_vanna_incremental(sync: bool = True) -> Dict[str, Any]:
         save_training_state(current_items)
         return {
             "mode": "full",
-            "schema": schema_count,
+            "schema_tables": table_count,
+            "schema_views": view_count,
             "relationships": fk_count,
             "semantic_docs": doc_count,
             "notes": note_count,
@@ -446,14 +599,23 @@ def init_semantic_store_from_ddl(
 
     schema_name = ddl_dump.get("schema", "")
     tables_ddl = ddl_dump.get("tables", {})
+    views_ddl = ddl_dump.get("views", {})
 
     if allowlist:
         tables_ddl = {k: v for k, v in tables_ddl.items() if k in allowlist}
+        views_ddl = {k: v for k, v in views_ddl.items() if k in allowlist}
+
+    table_names = sorted(tables_ddl.keys())
+    view_names = sorted(views_ddl.keys())
 
     store: Dict[str, Any] = {
         "schema_prefix": schema_name,
-        "allowlist": sorted(tables_ddl.keys()),
+        "allowlist": {
+            "tables": table_names,
+            "views": view_names,
+        },
         "tables": {},
+        "views": {},
         "notes": [],
         "examples": [],
     }
@@ -482,10 +644,33 @@ def init_semantic_store_from_ddl(
             "columns": columns,
         }
 
+    for view_name in sorted(views_ddl.keys()):
+        full_name = f"{schema_name}.{view_name}" if schema_name else view_name
+        columns: Dict[str, Any] = {}
+        ddl = views_ddl.get(view_name, "")
+        for col_name, col_type in _extract_columns_from_ddl(ddl):
+            col_full_name = f"{full_name}.{col_name}"
+            columns[col_name] = {
+                "id": column_id,
+                "name": col_name,
+                "full_name": col_full_name,
+                "data_type": col_type,
+                "description": "",
+            }
+            column_id += 1
+        store["views"][full_name] = {
+            "id": len(store["views"]) + 1,
+            "name": view_name,
+            "full_name": full_name,
+            "table_type": "view",
+            "description": "",
+            "columns": columns,
+        }
+
     with open(store_path, "w", encoding="utf-8") as handle:
         json.dump(store, handle, ensure_ascii=False, indent=2)
 
-    return len(store["tables"])
+    return len(store["tables"]) + len(store["views"])
 
 
 def _split_ddl_columns(body: str) -> list[str]:
@@ -587,25 +772,86 @@ def _extract_columns_from_ddl(ddl: str) -> list[tuple[str, str]]:
     return results
 
 
-def dump_ddl_to_file(path: str, force: bool = False) -> int:
-    """Dump DDL using SHOW CREATE TABLE into a JSON file.
+def dump_ddl_to_file(path: str, force: bool = False) -> tuple[int, int]:
+    """Dump DDL using SHOW CREATE TABLE/VIEW into a JSON file.
 
     Args:
         path: Output file path for ddl_dump.json
-        force: If True, dump all tables ignoring allowlist
+        force: If True, dump all tables and views ignoring allowlist
     """
-    db_utils = get_db_utils()
-    allowlist = None if force else get_table_allowlist()
-    tables = db_utils.get_table_list()
-    if allowlist:
-        tables = [t for t in tables if t["TABLE_NAME"] in allowlist]
+    from src.semantic.store import load_semantic_store, semantic_store_path
 
-    ddl_map: Dict[str, str] = {}
+    db_utils = get_db_utils()
+
+    # Get allowlist for tables and views
+    # None = no allowlist (dump all), [] = empty allowlist (dump nothing), [...] = filter
+    table_allowlist = None
+    view_allowlist = None
+    if not force and os.path.exists(semantic_store_path()):
+        store = load_semantic_store()
+        allowlist_obj = store.get("allowlist")
+        if allowlist_obj is not None and isinstance(allowlist_obj, dict):
+            # Check if "tables" key exists
+            if "tables" in allowlist_obj:
+                tables_raw = allowlist_obj.get("tables", [])
+                if not tables_raw:
+                    # Empty list -> dump nothing
+                    table_allowlist = []
+                else:
+                    # Non-empty list -> filter
+                    table_allowlist = [
+                        t.strip()
+                        for t in tables_raw
+                        if isinstance(t, str) and t.strip()
+                    ]
+
+            # Check if "views" key exists
+            if "views" in allowlist_obj:
+                views_raw = allowlist_obj.get("views", [])
+                if not views_raw:
+                    # Empty list -> dump nothing
+                    view_allowlist = []
+                else:
+                    # Non-empty list -> filter
+                    view_allowlist = [
+                        v.strip() for v in views_raw if isinstance(v, str) and v.strip()
+                    ]
+
+    # Dump tables
+    tables = db_utils.get_table_list()
+    if table_allowlist is not None:
+        # If allowlist is [], this will result in empty tables list
+        tables = [t for t in tables if t["TABLE_NAME"] in table_allowlist]
+
+    table_ddl_map: Dict[str, str] = {}
     for table in tables:
         table_name = table["TABLE_NAME"]
         ddl = db_utils.get_create_table_ddl(table_name)
         if ddl:
-            ddl_map[table_name] = ddl
+            table_ddl_map[table_name] = ddl
+
+    # Dump views (exposed columns only)
+    views = db_utils.get_view_list()
+    if view_allowlist is not None:
+        # If allowlist is [], this will result in empty views list
+        views = [v for v in views if v["TABLE_NAME"] in view_allowlist]
+
+    view_ddl_map: Dict[str, str] = {}
+    for view in views:
+        view_name = view["TABLE_NAME"]
+        ddl = extract_ddl_for_view(view_name)
+        if ddl:
+            view_ddl_map[view_name] = ddl
+
+    # Dump relationships (foreign keys)
+    relationships = db_utils.get_foreign_keys()
+    if table_allowlist is not None:
+        relationships = [
+            fk
+            for fk in relationships
+            if fk.get("TABLE_NAME") in table_allowlist
+            or fk.get("REFERENCED_TABLE_NAME") in table_allowlist
+        ]
 
     schema_name = (
         db_utils.db_config.database
@@ -615,19 +861,21 @@ def dump_ddl_to_file(path: str, force: bool = False) -> int:
     payload = {
         "schema": schema_name,
         "dumped_at": datetime.utcnow().isoformat() + "Z",
-        "tables": ddl_map,
+        "tables": table_ddl_map,
+        "views": view_ddl_map,
+        "relationships": relationships,
     }
 
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
 
-    return len(ddl_map)
+    return len(table_ddl_map), len(view_ddl_map)
 
 
 if __name__ == "__main__":
     print("Extracting schema...")
-    count = train_vanna_on_schema()
-    print(f"Trained Vanna on {count} table(s).")
+    table_count, view_count = train_vanna_on_schema()
+    print(f"Trained Vanna on {table_count} table(s) and {view_count} view(s).")
 
     print("Training on relationships...")
     fk_count = train_vanna_on_relationships()

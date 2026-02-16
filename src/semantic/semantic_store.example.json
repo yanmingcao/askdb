@@ -1,10 +1,15 @@
 {
   "schema_prefix": "sales",
-  "allowlist": [
-    "master_brand",
-    "data_target",
-    "data_sales"
-  ],
+  "allowlist": {
+    "tables": [
+      "master_brand",
+      "data_target",
+      "data_sales"
+    ],
+    "views": [
+      "vw_sales_summary"
+    ]
+  },
   "tables": {
     "sales.master_brand": {
       "id": 1,
@@ -26,6 +31,31 @@
           "full_name": "sales.master_brand.BrandName",
           "data_type": "STRING",
           "description": "Brand name"
+        }
+      }
+    }
+  },
+  "views": {
+    "sales.vw_sales_summary": {
+      "id": 1,
+      "name": "vw_sales_summary",
+      "full_name": "sales.vw_sales_summary",
+      "table_type": "view",
+      "description": "Aggregated sales summary view",
+      "columns": {
+        "BrandCode": {
+          "id": 138,
+          "name": "BrandCode",
+          "full_name": "sales.vw_sales_summary.BrandCode",
+          "data_type": "STRING",
+          "description": "Brand code"
+        },
+        "TotalSales": {
+          "id": 139,
+          "name": "TotalSales",
+          "full_name": "sales.vw_sales_summary.TotalSales",
+          "data_type": "DECIMAL",
+          "description": "Total sales amount"
         }
       }
     }
