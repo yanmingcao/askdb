@@ -98,6 +98,12 @@ class DatabaseUtils:
     def get_create_table_ddl(self, table_name: str) -> str:
         return self.adapter.get_create_table_ddl(table_name)
 
+    def get_view_list(self) -> List[Dict[str, Any]]:
+        return self.adapter.get_view_list()
+
+    def get_create_view_ddl(self, view_name: str) -> str:
+        return self.adapter.get_create_view_ddl(view_name)
+
     def connect_vanna(self, vn: Any) -> None:
         return self.adapter.connect_vanna(vn)
 

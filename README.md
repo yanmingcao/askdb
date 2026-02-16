@@ -89,7 +89,7 @@ askdb ask "查询2025年全产品线的销售达成总金额"
   - `--show-sql/--hide-sql` — show or hide generated SQL output (default: show)
   - `--max-retries` — retry SQL generation on errors (default: 1)
   - `--verbose` — show LLM prompt/response details
-- `train` — incremental training on semantic store changes (auto full retrain if deletions/allowlist changes detected)
+- `train` — incremental training on semantic store changes and ddl_dump.json (auto full retrain if deletions/allowlist changes detected)
   - `--full` — clear local training data and retrain everything
 - `dump-ddl` — dump raw DDL into `src/semantic/ddl_dump.json` (respects allowlist unless --force)
 - `init-semantic-store` — scaffold semantic_store.json from ddl_dump.json (optionally with --allowlist)
@@ -104,21 +104,42 @@ All semantic data lives in:
 `src/semantic/semantic_store.json`
 
 This includes:
-- `tables` and `columns` (descriptions, exclusions)
+- `tables` and `views` (descriptions, exclusions, columns)
 - `notes`
 - `examples` (question → SQL)
-- `allowlist` (tables to include in training and SQL generation)
+- `allowlist` (object with `tables` and `views` arrays; tables are enforced today)
 
 Excluded columns are skipped when building semantic docs and DDL training to reduce noise.
 
 ### Allowlist Behavior
 
-The `allowlist` in `semantic_store.json` controls which tables are:
+The `allowlist` in `semantic_store.json` is structured as:
+```json
+{
+  "allowlist": {
+    "tables": ["table1", "table2"],
+    "views": ["vw_view1", "vw_view2"]
+  }
+}
+```
+
+It controls which tables are:
 - Included in training (`train` command)
 - Validated in generated SQL (`ask` command)
 - Dumped by default (`dump-ddl` without --force)
 
-Use `dump-ddl --force` to dump all tables regardless of allowlist (useful for bootstrap).
+The `views` list is used for:
+- Dumping view DDL (`dump-ddl`) using exposed column names/types (not view SQL)
+- Including view semantic docs in training (`train`)
+
+`dump-ddl` also captures foreign key relationships for allowlisted tables so `train` can learn relationships without querying the live DB.
+
+**Allowlist Semantics:**
+- **Missing allowlist** (no `allowlist` key or no `tables`/`views` key): dump/train **all** tables/views
+- **Empty list** (`"tables": []` or `"views": []`): dump/train **nothing** for that section
+- **Non-empty list** (`"tables": ["t1", "t2"]`): dump/train **only** those specified
+
+Use `dump-ddl --force` to dump all tables and views regardless of allowlist (useful for bootstrap).
 Use `init-semantic-store` to scaffold the semantic store from a full DDL dump.
 
 ## Conversational Behavior

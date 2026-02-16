@@ -189,17 +189,73 @@ def get_vanna_config() -> Dict[str, Any]:
 
 
 def get_table_allowlist() -> Optional[list[str]]:
-    """Get table allowlist from semantic store. Returns None if empty (= all tables)."""
+    """Get table allowlist from semantic store.
+
+    Returns:
+        None: allowlist not present (= dump all tables)
+        []: allowlist.tables exists but is empty (= dump nothing)
+        [...]: allowlist.tables has entries (= dump only those)
+    """
     from src.semantic.store import load_semantic_store, semantic_store_path
 
     if not os.path.exists(semantic_store_path()):
         return None
 
     store = load_semantic_store()
-    allowlist = store.get("allowlist", [])
-    if not allowlist:
+    allowlist_obj = store.get("allowlist")
+
+    # No allowlist key at all -> dump all
+    if allowlist_obj is None:
         return None
-    return [t.strip() for t in allowlist if isinstance(t, str) and t.strip()]
+
+    if isinstance(allowlist_obj, dict):
+        # allowlist exists but no "tables" key -> dump all
+        if "tables" not in allowlist_obj:
+            return None
+
+        tables = allowlist_obj.get("tables", [])
+        # Empty list -> dump nothing
+        if not tables:
+            return []
+        # Non-empty list -> filter and return
+        return [t.strip() for t in tables if isinstance(t, str) and t.strip()]
+
+    return None
+
+
+def get_view_allowlist() -> Optional[list[str]]:
+    """Get view allowlist from semantic store.
+
+    Returns:
+        None: allowlist not present (= dump all views)
+        []: allowlist.views exists but is empty (= dump nothing)
+        [...]: allowlist.views has entries (= dump only those)
+    """
+    from src.semantic.store import load_semantic_store, semantic_store_path
+
+    if not os.path.exists(semantic_store_path()):
+        return None
+
+    store = load_semantic_store()
+    allowlist_obj = store.get("allowlist")
+
+    # No allowlist key at all -> dump all
+    if allowlist_obj is None:
+        return None
+
+    if isinstance(allowlist_obj, dict):
+        # allowlist exists but no "views" key -> dump all
+        if "views" not in allowlist_obj:
+            return None
+
+        views = allowlist_obj.get("views", [])
+        # Empty list -> dump nothing
+        if not views:
+            return []
+        # Non-empty list -> filter and return
+        return [v.strip() for v in views if isinstance(v, str) and v.strip()]
+
+    return None
 
 
 def create_vanna_instance() -> AskDBVanna:

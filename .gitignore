@@ -12,5 +12,6 @@ chromadb_data/
 node_modules/
 .pytest_cache/
 vanna-main/
+mysql-local/
 src/semantic/ddl_dump.json
 src/semantic/semantic_store.json
