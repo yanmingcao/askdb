@@ -137,6 +137,26 @@ class PostgresAdapter:
         ddl += "\n);"
         return ddl
 
+    def get_view_list(self) -> List[Dict[str, Any]]:
+        query = """
+        SELECT table_name AS "TABLE_NAME", COALESCE(obj_description((table_schema||'.'||table_name)::regclass), '') AS "TABLE_COMMENT"
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_type = 'VIEW'
+        ORDER BY table_name
+        """
+        return self.execute_query(query)
+
+    def get_create_view_ddl(self, view_name: str) -> str:
+        query = """
+        SELECT pg_get_viewdef(%s, true) AS view_definition
+        """
+        results = self.execute_query(query, (view_name,))
+        if results:
+            view_def = results[0].get("view_definition", "")
+            if view_def:
+                return f"CREATE VIEW {view_name} AS\n{view_def}"
+        return ""
+
     def connect_vanna(self, vn: Any) -> None:
         if not hasattr(vn, "connect_to_postgres"):
             raise RuntimeError("Vanna does not support PostgreSQL in this build")

@@ -115,6 +115,24 @@ class SQLiteAdapter:
             return rows[0].get("sql", "") or ""
         return ""
 
+    def get_view_list(self) -> List[Dict[str, Any]]:
+        query = """
+        SELECT name AS TABLE_NAME, '' AS TABLE_COMMENT
+        FROM sqlite_master
+        WHERE type = 'view'
+        ORDER BY name
+        """
+        return self.execute_query(query)
+
+    def get_create_view_ddl(self, view_name: str) -> str:
+        rows = self.execute_query(
+            "SELECT sql FROM sqlite_master WHERE type='view' AND name=?",
+            (view_name,),
+        )
+        if rows:
+            return rows[0].get("sql", "") or ""
+        return ""
+
     def connect_vanna(self, vn: Any) -> None:
         if not hasattr(vn, "connect_to_sqlite"):
             raise RuntimeError("Vanna does not support SQLite in this build")

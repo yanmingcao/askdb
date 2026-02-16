@@ -131,6 +131,21 @@ class MySQLAdapter:
             return results[0].get("Create Table", "")
         return ""
 
+    def get_view_list(self) -> List[Dict[str, Any]]:
+        query = """
+        SELECT TABLE_NAME, TABLE_COMMENT
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = %s AND TABLE_TYPE = 'VIEW'
+        ORDER BY TABLE_NAME
+        """
+        return self.execute_query(query, (self.database_name,))
+
+    def get_create_view_ddl(self, view_name: str) -> str:
+        results = self.execute_query(f"SHOW CREATE VIEW `{view_name}`")
+        if results:
+            return results[0].get("Create View", "")
+        return ""
+
     def connect_vanna(self, vn: Any) -> None:
         vn.connect_to_mysql(
             host=self.config.host,
