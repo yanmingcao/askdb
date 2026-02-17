@@ -30,6 +30,8 @@ def load_session_state() -> List[Dict[str, Any]]:
         # Handle legacy format: single turn dict -> convert to list
         if isinstance(data, dict):
             if "question" in data and "sql" in data and "columns" in data:
+                if "status" not in data:
+                    data["status"] = "ok"
                 return [data]
             return []
 
@@ -45,6 +47,8 @@ def load_session_state() -> List[Dict[str, Any]]:
                     and "columns" in turn
                     and isinstance(turn["columns"], list)
                 ):
+                    if "status" not in turn:
+                        turn["status"] = "ok"
                     valid_turns.append(turn)
             return valid_turns
 
@@ -53,7 +57,9 @@ def load_session_state() -> List[Dict[str, Any]]:
         return []
 
 
-def save_session_state(question: str, sql: str, columns: List[str]) -> None:
+def save_session_state(
+    question: str, sql: str, columns: List[str], status: str = "ok"
+) -> None:
     """Save current turn context and maintain sliding window of max 5 turns.
 
     Args:
@@ -71,6 +77,7 @@ def save_session_state(question: str, sql: str, columns: List[str]) -> None:
         "question": question,
         "sql": sql,
         "columns": columns,
+        "status": status,
     }
     turns.append(new_turn)
 
@@ -93,3 +100,19 @@ def clear_session_state() -> None:
             session_file.unlink()
         except OSError:
             pass
+
+
+def update_last_turn_status(status: str) -> bool:
+    """Update status of the most recent turn. Returns True if updated."""
+    session_file = _get_session_file()
+    turns = load_session_state()
+    if not turns:
+        return False
+
+    turns[-1]["status"] = status
+    try:
+        with open(session_file, "w", encoding="utf-8") as f:
+            json.dump(turns, f, ensure_ascii=False, indent=2)
+    except OSError:
+        return False
+    return True

@@ -164,16 +164,17 @@ def reset_training(yes: bool) -> None:
 
 @cli.command("dump-ddl")
 @click.option(
-    "--force",
+    "--all",
+    "all_",
     is_flag=True,
     help="Dump all tables and views, ignoring allowlist in semantic_store.json.",
 )
-def dump_ddl(force: bool) -> None:
-    """Dump DB DDL to src/semantic/ddl_dump.json (respects allowlist unless --force)."""
+def dump_ddl(all_: bool) -> None:
+    """Dump DB DDL to src/semantic/ddl_dump.json (respects allowlist unless --all)."""
     from src.training.schema_extractor import dump_ddl_to_file
 
     ddl_path = Path(__file__).resolve().parents[1] / "semantic" / "ddl_dump.json"
-    table_count, view_count = dump_ddl_to_file(str(ddl_path), force=force)
+    table_count, view_count = dump_ddl_to_file(str(ddl_path), force=all_)
     console.print(
         f"[green]Dumped DDL for {table_count} table(s) and {view_count} view(s).[/green]"
     )
@@ -200,9 +201,7 @@ def init_semantic_store(allowlist: tuple[str, ...]) -> None:
     )
 
     if not ddl_path.exists():
-        console.print(
-            "[red]ddl_dump.json not found. Run 'dump-ddl --force' first.[/red]"
-        )
+        console.print("[red]ddl_dump.json not found. Run 'dump-ddl --all' first.[/red]")
         raise SystemExit(1)
 
     if store_path.exists():
@@ -307,6 +306,12 @@ def ask(
                     console.print()
                     continue
 
+            if user_input.startswith("/ok") or user_input.startswith("/reject"):
+                handled = _handle_turn_status_command(user_input)
+                if handled:
+                    console.print()
+                    continue
+
             # Check for exit keywords
             if user_input.lower() in {"exit", "quit", "q"}:
                 console.print("[dim]Exiting...[/dim]")
@@ -358,10 +363,12 @@ def _process_question(
             q = turn.get("question", "")
             sql = turn.get("sql", "")
             cols = turn.get("columns", [])
+            status = turn.get("status", "ok")
             context_lines.append(f"Turn {i}:")
             context_lines.append(f"  Question: {q}")
-            context_lines.append(f"  SQL: {sql}")
-            context_lines.append(f"  Columns: {', '.join(cols)}")
+            if status == "ok":
+                context_lines.append(f"  SQL: {sql}")
+                context_lines.append(f"  Columns: {', '.join(cols)}")
 
         refinement_prompt = (
             "\n".join(context_lines)
@@ -453,6 +460,25 @@ def _handle_save_command(
     console.print("[green]Saved example to semantic_store.json.[/green]")
     pending_examples.append({"question": question, "sql": sql})
     console.print("[dim]Queued example for training at exit.[/dim]")
+    return True
+
+
+def _handle_turn_status_command(command: str) -> bool:
+    if command not in {"/ok", "/reject"}:
+        return False
+
+    from src.cli.session_state import update_last_turn_status
+
+    status = "ok" if command == "/ok" else "rejected"
+    updated = update_last_turn_status(status)
+    if not updated:
+        console.print("[yellow]No previous turn to update.[/yellow]")
+        return True
+
+    if status == "ok":
+        console.print("[green]Marked last turn as ok.[/green]")
+    else:
+        console.print("[yellow]Marked last turn as rejected.[/yellow]")
     return True
 
 

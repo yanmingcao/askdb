@@ -17,7 +17,7 @@ Ask questions in natural language and query a MySQL database with Vanna AI.
    ```
 4. Dump full DDL (ignores allowlist):
    ```bash
-   python -m src.cli.main dump-ddl --force
+python -m src.cli.main dump-ddl --all
    ```
 5. Initialize semantic store from DDL dump:
    ```bash
@@ -91,7 +91,7 @@ askdb ask "查询2025年全产品线的销售达成总金额"
   - `--verbose` — show LLM prompt/response details
 - `train` — incremental training on semantic store changes and ddl_dump.json (auto full retrain if deletions/allowlist changes detected)
   - `--full` — clear local training data and retrain everything
-- `dump-ddl` — dump raw DDL into `src/semantic/ddl_dump.json` (respects allowlist unless --force)
+- `dump-ddl` — dump raw DDL into `src/semantic/ddl_dump.json` (respects allowlist unless --all)
 - `init-semantic-store` — scaffold semantic_store.json from ddl_dump.json (optionally with --allowlist)
 - `semantic-tui` — edit semantic store (tables/columns/notes/examples)
 - `schema` — list tables (respects allowlist)
@@ -139,7 +139,7 @@ The `views` list is used for:
 - **Empty list** (`"tables": []` or `"views": []`): dump/train **nothing** for that section
 - **Non-empty list** (`"tables": ["t1", "t2"]`): dump/train **only** those specified
 
-Use `dump-ddl --force` to dump all tables and views regardless of allowlist (useful for bootstrap).
+Use `dump-ddl --all` to dump all tables and views regardless of allowlist (useful for bootstrap).
 Use `init-semantic-store` to scaffold the semantic store from a full DDL dump.
 
 ## Conversational Behavior
