@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List
 
 
 def _get_session_file() -> Path:

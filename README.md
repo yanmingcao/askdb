@@ -214,10 +214,10 @@ askdb ask "新问题" --clear-context
       |        ^
       |        |
       v        |
-  SQL Generation + Context Retrieval (ChromaDB)
-      |
-      |  LLM Call #1 (SQL generation)
-      |        ^
+  Context Retrieval (ChromaDB)
+      |        |
+      v        |
+  SQL Generation <--- LLM Call #1
       |        |
       v        |
   Validation (allowlist) <--- semantic_store.json
@@ -226,11 +226,10 @@ askdb ask "新问题" --clear-context
   DB Adapter (src/db/*) ---> Target Database
       |
       v
-  Results -> Table/Chart
-       |
-       |  LLM Call #2 (insights, optional)
-       v
-  Insights
+  Results -> Data Point/Table/Chart
+      |
+      v
+  Insights <--- LLM Call #2 (optional)
 ```
 
 ## Key Technologies

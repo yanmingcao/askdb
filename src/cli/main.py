@@ -1,9 +1,7 @@
 """AskDB CLI - Natural language to SQL query tool."""
 
 import re
-import shlex
 import shutil
-import threading
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 import click
@@ -298,20 +296,6 @@ def ask(
             if not user_input:
                 continue
 
-            if user_input.startswith("/save"):
-                handled = _handle_save_command(
-                    user_input, last_success, pending_examples
-                )
-                if handled:
-                    console.print()
-                    continue
-
-            if user_input.startswith("/ok") or user_input.startswith("/reject"):
-                handled = _handle_turn_status_command(user_input)
-                if handled:
-                    console.print()
-                    continue
-
             # Check for exit keywords
             if user_input.lower() in {"exit", "quit", "q"}:
                 console.print("[dim]Exiting...[/dim]")
@@ -323,6 +307,16 @@ def ask(
             )
             if result:
                 last_success = result
+                menu_result = _post_query_menu(
+                    last_success,
+                    pending_examples,
+                    max_retries,
+                    verbose,
+                    insights,
+                    show_sql,
+                )
+                if menu_result:
+                    last_success = menu_result
             console.print()  # Blank line between turns
         if pending_examples:
             from src.training.schema_extractor import train_vanna_incremental
@@ -413,35 +407,11 @@ def _process_question(
     return {"question": question, "sql": sql}
 
 
-def _handle_save_command(
-    command: str,
-    last_success: dict[str, str] | None,
+def _save_example(
+    last_success: dict[str, str],
+    notes_text: str,
     pending_examples: list[dict[str, str]],
 ) -> bool:
-    if not command.startswith("/save"):
-        return False
-
-    if (
-        not last_success
-        or not last_success.get("question")
-        or not last_success.get("sql")
-    ):
-        console.print("[yellow]No successful query to save yet.[/yellow]")
-        return True
-
-    try:
-        args = shlex.split(command)
-    except ValueError:
-        args = command.split()
-
-    notes_text = ""
-    if "--notes" in args:
-        idx = args.index("--notes")
-        if idx + 1 < len(args):
-            notes_text = args[idx + 1].strip()
-        else:
-            notes_text = input("Notes (optional): ").strip()
-
     from src.semantic.store import load_semantic_store, save_semantic_store
 
     store = load_semantic_store()
@@ -452,34 +422,73 @@ def _handle_save_command(
     for entry in examples:
         if entry.get("question") == question and entry.get("sql") == sql:
             console.print("[yellow]Example already exists.[/yellow]")
-            return True
+            return False
 
     examples.append({"question": question, "sql": sql, "notes": notes_text})
     store["examples"] = examples
     save_semantic_store(store)
     console.print("[green]Saved example to semantic_store.json.[/green]")
     pending_examples.append({"question": question, "sql": sql})
-    console.print("[dim]Queued example for training at exit.[/dim]")
     return True
 
 
-def _handle_turn_status_command(command: str) -> bool:
-    if command not in {"/ok", "/reject"}:
-        return False
+def _post_query_menu(
+    last_success: dict[str, str],
+    pending_examples: list[dict[str, str]],
+    max_retries: int,
+    verbose: bool,
+    insights: bool,
+    show_sql: bool,
+) -> dict[str, str] | None:
+    prompt = (
+        "Next step?\n"
+        "  1) SQL ok — next question\n"
+        "  2) SQL ok — refine it\n"
+        "  3) SQL ok — save as example\n"
+        "  4) SQL not right — correction\n"
+        "  5) SQL not right — reject\n"
+    )
 
-    from src.cli.session_state import update_last_turn_status
+    while True:
+        console.print(prompt)
+        choice = input("Choose [1-5] (default 1): ").strip()
+        if not choice:
+            choice = "1"
 
-    status = "ok" if command == "/ok" else "rejected"
-    updated = update_last_turn_status(status)
-    if not updated:
-        console.print("[yellow]No previous turn to update.[/yellow]")
-        return True
+        if choice == "1":
+            return None
 
-    if status == "ok":
-        console.print("[green]Marked last turn as ok.[/green]")
-    else:
-        console.print("[yellow]Marked last turn as rejected.[/yellow]")
-    return True
+        if choice == "2":
+            refine = input("Refine prompt: ").strip()
+            if not refine:
+                return None
+            return _process_question(refine, max_retries, verbose, insights, show_sql)
+
+        if choice == "3":
+            notes = input("Notes (optional): ").strip()
+            _save_example(last_success, notes, pending_examples)
+            return None
+
+        if choice == "4":
+            correction = input("Correction for re-generation: ").strip()
+            if not correction:
+                return None
+            base_question = last_success.get("question", "")
+            combined = (
+                f"{base_question}\nCorrection: {correction}"
+                if base_question
+                else correction
+            )
+            return _process_question(combined, max_retries, verbose, insights, show_sql)
+
+        if choice == "5":
+            from src.cli.session_state import update_last_turn_status
+
+            update_last_turn_status("rejected")
+            console.print("[yellow]Marked last turn as rejected.[/yellow]")
+            return None
+
+        console.print("[yellow]Invalid choice. Please select 1-5.[/yellow]")
 
 
 @cli.command()
