@@ -1,0 +1,98 @@
+{
+  "schema": "sales",
+  "artifact": "semantic_knowledge_graph",
+  "version": "v1",
+  "description": "Minimal business knowledge graph example for NL2SQL guidance.",
+  "nodes": [
+    {
+      "id": "Brand",
+      "source": "vw_dim_brand",
+      "primary_key": [
+        "BrandCode"
+      ],
+      "attributes": [
+        "BrandName"
+      ]
+    },
+    {
+      "id": "Sales",
+      "source": "vw_fact_sales",
+      "primary_key": [
+        "SalesRecordId"
+      ],
+      "attributes": [
+        "Year",
+        "Month",
+        "BrandCode",
+        "SalesAmountIncludingTax"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "Sales",
+      "to": "Brand",
+      "type": "many_to_one",
+      "join": [
+        [
+          "Sales.BrandCode",
+          "Brand.BrandCode"
+        ]
+      ],
+      "meaning": "sales belong to brand"
+    }
+  ],
+  "canonical_join_paths": [
+    {
+      "name": "SalesByBrand",
+      "steps": [
+        "Sales -> Brand (BrandCode)"
+      ]
+    }
+  ],
+  "metrics": [
+    {
+      "name": "SalesAmount",
+      "source_column": "Sales.SalesAmountIncludingTax",
+      "aggregation": "SUM",
+      "description": "Total sales amount including tax"
+    }
+  ],
+  "time_model": {
+    "fields": {
+      "Year": "varchar(4)",
+      "Month": "varchar(2)"
+    },
+    "filters": [
+      {
+        "pattern": "single month",
+        "example": "WHERE Year='2026' AND Month='01'"
+      }
+    ]
+  },
+  "synonym_dict": {
+    "metrics": {
+      "sales amount": "SalesAmount"
+    },
+    "entities": {
+      "brand": "Brand"
+    }
+  },
+  "query_templates": [
+    {
+      "id": "Q001_Sales_By_Brand_Month",
+      "question_zh": "查询{Year}年{Month}月各品牌销售额",
+      "intent": "aggregate_total",
+      "uses": [
+        "vw_fact_sales",
+        "vw_dim_brand"
+      ],
+      "params": {
+        "Year": "2026",
+        "Month": "01"
+      },
+      "sql_template": "SELECT\n  b.BrandName,\n  SUM(s.SalesAmountIncludingTax) AS SalesAmount\nFROM vw_fact_sales s\nJOIN vw_dim_brand b ON s.BrandCode = b.BrandCode\nWHERE s.Year = '{Year}'\n  AND s.Month = '{Month}'\nGROUP BY b.BrandName\nORDER BY SalesAmount DESC;",
+      "notes": "Simple aggregation example."
+    }
+  ]
+}
