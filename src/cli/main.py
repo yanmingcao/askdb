@@ -45,6 +45,7 @@ def train(full: bool) -> None:
         reset_chromadb_data,
         train_vanna_on_schema,
         train_vanna_on_relationships,
+        train_vanna_on_knowledge_graph,
         train_vanna_on_semantic_schema,
         train_vanna_on_semantic_notes,
         train_vanna_on_semantic_examples,
@@ -85,6 +86,12 @@ def train(full: bool) -> None:
                 fk_count = train_vanna_on_relationships()
             console.print(f"[green]Trained on {fk_count} relationship(s).[/green]")
 
+            with console.status("Training on knowledge graph..."):
+                kg_count = train_vanna_on_knowledge_graph()
+            console.print(
+                f"[green]Trained on {kg_count} knowledge graph doc(s).[/green]"
+            )
+
             with console.status("Training on semantic schema documentation..."):
                 doc_count = train_vanna_on_semantic_schema()
             console.print(
@@ -116,6 +123,9 @@ def train(full: bool) -> None:
             f"[green]Trained on {result.get('relationships', 0)} relationship(s).[/green]"
         )
         console.print(
+            f"[green]Trained on {result.get('knowledge_graph', 0)} knowledge graph doc(s).[/green]"
+        )
+        console.print(
             "[green]Trained on "
             f"{result.get('semantic_docs', 0)} semantic table/view metadata entries.[/green]"
         )
@@ -127,7 +137,10 @@ def train(full: bool) -> None:
         )
     else:
         console.print(
-            f"[green]Trained on {result.get('semantic_docs', 0)} semantic doc(s).[/green]"
+            f"[green]Trained on {result.get('knowledge_graph', 0)} knowledge graph doc(s).[/green]"
+        )
+        console.print(
+            f"[green]Trained on {result.get('semantic_docs', 0)} semantic table/view metadata entries.[/green]"
         )
         console.print(
             f"[green]Trained on {result.get('notes', 0)} semantic note(s).[/green]"
@@ -337,6 +350,7 @@ def _process_question(
 ) -> dict[str, str] | None:
     """Process a single question (used by both interactive and non-interactive modes)."""
     from src.config.vanna_config import get_vanna, vanna_lock
+    from src.training.schema_extractor import select_kg_snippet
     from src.cli.session_state import (
         load_session_state,
         save_session_state,
@@ -350,6 +364,11 @@ def _process_question(
     # Load conversation history (sliding window of max 5 turns)
     turns = load_session_state()
     enhanced_question = question
+    kg_snippet = select_kg_snippet(question)
+    if kg_snippet:
+        enhanced_question = (
+            f"Knowledge Graph Hints:\n{kg_snippet}\n\nQuestion: {question}"
+        )
     if turns:
         # Build context from all available turns
         context_lines = ["Conversation history:"]
@@ -366,7 +385,8 @@ def _process_question(
 
         refinement_prompt = (
             "\n".join(context_lines)
-            + f"\n\nNew question (may be a refinement or follow-up): {question}"
+            + "\n\nNew question (may be a refinement or follow-up): "
+            + enhanced_question
         )
         enhanced_question = refinement_prompt
 

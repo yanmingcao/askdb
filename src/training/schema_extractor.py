@@ -153,6 +153,255 @@ def _load_ddl_dump() -> Dict[str, Any]:
         return json.load(handle)
 
 
+def _load_knowledge_graph() -> Dict[str, Any] | None:
+    graph_path = (
+        Path(__file__).resolve().parents[1] / "semantic" / "knowledge_graph.json"
+    )
+    if not graph_path.exists():
+        return None
+    with graph_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _filter_knowledge_graph(
+    graph: Dict[str, Any], view_allowlist: Optional[List[str]]
+) -> Dict[str, Any]:
+    if view_allowlist is None:
+        return graph
+
+    allowed = set(view_allowlist)
+    nodes = [node for node in graph.get("nodes", []) if node.get("source") in allowed]
+    node_ids = {node.get("id") for node in nodes if node.get("id")}
+    edges = [
+        edge
+        for edge in graph.get("edges", [])
+        if edge.get("from") in node_ids and edge.get("to") in node_ids
+    ]
+
+    filtered = dict(graph)
+    filtered["nodes"] = nodes
+    filtered["edges"] = edges
+    return filtered
+
+
+def _knowledge_graph_to_doc(graph: Dict[str, Any]) -> str:
+    lines: list[str] = []
+    description = graph.get("description")
+    if description:
+        lines.append(f"Knowledge Graph: {description}")
+    else:
+        lines.append("Knowledge Graph")
+
+    nodes = graph.get("nodes", [])
+    if nodes:
+        lines.append("Nodes:")
+        for node in nodes:
+            node_id = node.get("id", "")
+            source = node.get("source", "")
+            pk = node.get("primary_key", [])
+            attrs = node.get("attributes", [])
+            lines.append(f"- {node_id} (source: {source})")
+            if pk:
+                lines.append(f"  PK: {', '.join(pk)}")
+            if attrs:
+                lines.append(f"  Attributes: {', '.join(attrs)}")
+
+    edges = graph.get("edges", [])
+    if edges:
+        lines.append("Edges:")
+        for edge in edges:
+            from_node = edge.get("from", "")
+            to_node = edge.get("to", "")
+            meaning = edge.get("meaning", "")
+            join_pairs = edge.get("join", [])
+            join_desc = ", ".join([f"{a} = {b}" for a, b in join_pairs])
+            line = f"- {from_node} -> {to_node}"
+            if meaning:
+                line += f" ({meaning})"
+            lines.append(line)
+            if join_desc:
+                lines.append(f"  Join: {join_desc}")
+
+    join_paths = graph.get("canonical_join_paths", [])
+    if join_paths:
+        lines.append("Canonical Join Paths:")
+        for path in join_paths:
+            name = path.get("name", "")
+            steps = path.get("steps", [])
+            lines.append(f"- {name}: {', '.join(steps)}")
+
+    metrics = graph.get("metrics", [])
+    if metrics:
+        lines.append("Metrics:")
+        for metric in metrics:
+            name = metric.get("name", "")
+            source_col = metric.get("source_column", "")
+            agg = metric.get("aggregation", "")
+            desc = metric.get("description", "")
+            line = f"- {name}: {agg}({source_col})"
+            if desc:
+                line += f" — {desc}"
+            lines.append(line)
+
+    time_model = graph.get("time_model", {})
+    if time_model:
+        fields = time_model.get("fields", {})
+        filters = time_model.get("filters", [])
+        if fields:
+            lines.append("Time Fields:")
+            for name, dtype in fields.items():
+                lines.append(f"- {name}: {dtype}")
+        if filters:
+            lines.append("Time Filter Patterns:")
+            for entry in filters:
+                pattern = entry.get("pattern", "")
+                example = entry.get("example", "")
+                lines.append(f"- {pattern}: {example}")
+
+    synonyms = graph.get("synonym_dict", {})
+    if synonyms:
+        lines.append("Synonyms:")
+        for category, mapping in synonyms.items():
+            lines.append(f"- {category}:")
+            for key, value in mapping.items():
+                lines.append(f"  {key} -> {value}")
+
+    templates = graph.get("query_templates", [])
+    if templates:
+        lines.append("Query Templates:")
+        for template in templates:
+            qid = template.get("id", "")
+            question = template.get("question_zh", "")
+            sql = template.get("sql_template", "")
+            lines.append(f"- {qid}: {question}")
+            if sql:
+                lines.append("  SQL:")
+                for sql_line in sql.splitlines():
+                    lines.append(f"    {sql_line}")
+
+    return "\n".join(lines).strip()
+
+
+def select_kg_snippet(question: str, max_lines: int = 40) -> str:
+    """Select a small knowledge-graph snippet relevant to the question."""
+    graph = _load_knowledge_graph()
+    if not graph:
+        return ""
+
+    view_allowlist = get_view_allowlist()
+    graph = _filter_knowledge_graph(graph, view_allowlist)
+
+    q = (question or "").lower()
+    if not q:
+        return ""
+
+    nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
+    metrics = graph.get("metrics", [])
+    synonyms = graph.get("synonym_dict", {})
+    templates = graph.get("query_templates", [])
+
+    matched_node_ids: set[str] = set()
+    matched_sources: set[str] = set()
+
+    for node in nodes:
+        node_id = str(node.get("id", "")).lower()
+        source = str(node.get("source", ""))
+        if node_id and node_id in q:
+            matched_node_ids.add(node.get("id", ""))
+            if source:
+                matched_sources.add(source)
+
+    entity_map = synonyms.get("entities", {}) if isinstance(synonyms, dict) else {}
+    for label, node_id in entity_map.items():
+        if label.lower() in q:
+            matched_node_ids.add(node_id)
+
+    metric_map = synonyms.get("metrics", {}) if isinstance(synonyms, dict) else {}
+    matched_metrics = []
+    for label, metric_name in metric_map.items():
+        if label.lower() in q:
+            matched_metrics.append(metric_name)
+
+    lines: list[str] = []
+
+    if matched_node_ids:
+        lines.append("Nodes:")
+        for node in nodes:
+            node_id = node.get("id")
+            if node_id not in matched_node_ids:
+                continue
+            source = node.get("source", "")
+            pk = node.get("primary_key", [])
+            attrs = node.get("attributes", [])
+            lines.append(f"- {node_id} (source: {source})")
+            if pk:
+                lines.append(f"  PK: {', '.join(pk)}")
+            if attrs:
+                lines.append(f"  Attributes: {', '.join(attrs)}")
+
+    if matched_node_ids:
+        lines.append("Edges:")
+        for edge in edges:
+            if (
+                edge.get("from") in matched_node_ids
+                or edge.get("to") in matched_node_ids
+            ):
+                join_pairs = edge.get("join", [])
+                join_desc = ", ".join([f"{a} = {b}" for a, b in join_pairs])
+                line = f"- {edge.get('from')} -> {edge.get('to')}"
+                meaning = edge.get("meaning", "")
+                if meaning:
+                    line += f" ({meaning})"
+                lines.append(line)
+                if join_desc:
+                    lines.append(f"  Join: {join_desc}")
+
+    if matched_metrics:
+        lines.append("Metrics:")
+        for metric in metrics:
+            name = metric.get("name", "")
+            if name not in matched_metrics:
+                continue
+            source_col = metric.get("source_column", "")
+            agg = metric.get("aggregation", "")
+            desc = metric.get("description", "")
+            line = f"- {name}: {agg}({source_col})"
+            if desc:
+                line += f" — {desc}"
+            lines.append(line)
+
+    if matched_node_ids:
+        lines.append("Canonical Join Paths:")
+        for path in graph.get("canonical_join_paths", []):
+            steps = path.get("steps", [])
+            if not steps:
+                continue
+            steps_text = " ".join(steps)
+            if any(node_id in steps_text for node_id in matched_node_ids):
+                lines.append(f"- {path.get('name', '')}: {', '.join(steps)}")
+
+    if matched_metrics:
+        lines.append("Query Templates:")
+        for template in templates:
+            uses = template.get("uses", [])
+            if uses and not any(u in matched_sources for u in uses):
+                continue
+            sql = template.get("sql_template", "")
+            question_zh = template.get("question_zh", "")
+            if question_zh:
+                lines.append(f"- {template.get('id', '')}: {question_zh}")
+            if sql:
+                lines.append("  SQL:")
+                for sql_line in sql.splitlines():
+                    lines.append(f"    {sql_line}")
+
+    if not lines:
+        return ""
+
+    return "\n".join(lines[:max_lines]).strip()
+
+
 def _filter_ddl_map(
     ddl_map: Dict[str, Any], allowlist: Optional[List[str]]
 ) -> Dict[str, Any]:
@@ -428,17 +677,53 @@ def train_vanna_on_semantic_examples(vn: Optional[AskDBVanna] = None) -> int:
     return count
 
 
+def train_vanna_on_knowledge_graph(vn: Optional[AskDBVanna] = None) -> int:
+    """Train Vanna on business knowledge graph documentation."""
+    if vn is None:
+        vn = get_vanna()
+
+    graph = _load_knowledge_graph()
+    if not graph:
+        return 0
+
+    view_allowlist = get_view_allowlist()
+    graph = _filter_knowledge_graph(graph, view_allowlist)
+    doc = _knowledge_graph_to_doc(graph)
+    if not doc:
+        return 0
+
+    vn.train(documentation=doc)
+    return 1
+
+
 def _compute_semantic_items() -> Dict[str, Dict[str, Any]]:
     allowlist = get_table_allowlist() or []
     view_allowlist = get_view_allowlist() or []
     store = load_semantic_store()
     items: Dict[str, Dict[str, Any]] = {}
 
+    graph = _load_knowledge_graph()
+    if graph is not None:
+        view_allowlist = get_view_allowlist()
+        graph = _filter_knowledge_graph(graph, view_allowlist)
+        doc = _knowledge_graph_to_doc(graph)
+        if doc:
+            graph_hash = hash_text(
+                json.dumps(
+                    graph, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+                )
+            )
+            items["knowledge_graph"] = {
+                "hash": graph_hash,
+                "type": "knowledge_graph",
+                "payload": doc,
+            }
+
     allowlist_hash = hash_text(
         json.dumps(
             {
                 "tables": sorted(allowlist),
-                "views": sorted(view_allowlist),
+                "views": sorted(view_allowlist or []),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -532,12 +817,14 @@ def train_vanna_incremental(
                 "schema_tables": 0,
                 "schema_views": 0,
                 "relationships": 0,
+                "knowledge_graph": 0,
                 "semantic_docs": 0,
                 "notes": 0,
                 "examples": 0,
             }
         table_count, view_count = train_vanna_on_schema()
         fk_count = train_vanna_on_relationships()
+        kg_count = train_vanna_on_knowledge_graph()
         doc_count = train_vanna_on_semantic_schema()
         note_count = train_vanna_on_semantic_notes()
         ex_count = train_vanna_on_semantic_examples()
@@ -547,18 +834,23 @@ def train_vanna_incremental(
             "schema_tables": table_count,
             "schema_views": view_count,
             "relationships": fk_count,
+            "knowledge_graph": kg_count,
             "semantic_docs": doc_count,
             "notes": note_count,
             "examples": ex_count,
         }
 
+    kg_count = 0
     doc_count = 0
     note_count = 0
     ex_count = 0
     vn = get_vanna()
     for item in changed.values():
         item_type = item.get("type")
-        if item_type == "schema_doc":
+        if item_type == "knowledge_graph":
+            vn.train(documentation=item.get("payload", ""))
+            kg_count += 1
+        elif item_type == "schema_doc":
             vn.train(documentation=item.get("payload", ""))
             doc_count += 1
         elif item_type == "note":
@@ -575,6 +867,7 @@ def train_vanna_incremental(
     save_training_state(current_items)
     return {
         "mode": "incremental",
+        "knowledge_graph": kg_count,
         "semantic_docs": doc_count,
         "notes": note_count,
         "examples": ex_count,

@@ -89,7 +89,7 @@ askdb ask "查询2025年全产品线的销售达成总金额"
   - `--show-sql/--hide-sql` — show or hide generated SQL output (default: show)
   - `--max-retries` — retry SQL generation on errors (default: 1)
   - `--verbose` — show LLM prompt/response details
-- `train` — incremental training on semantic store changes and ddl_dump.json (auto full retrain if deletions/allowlist changes detected)
+- `train` — incremental training on semantic store changes, knowledge graph, and ddl_dump.json (auto full retrain if deletions/allowlist changes detected)
   - `--full` — clear local training data and retrain everything
 - `dump-ddl` — dump raw DDL into `src/semantic/ddl_dump.json` (respects allowlist unless --all)
 - `init-semantic-store` — scaffold semantic_store.json from ddl_dump.json (optionally with --allowlist)
@@ -196,7 +196,8 @@ askdb ask "新问题" --clear-context
 - `src/db/` — database adapters.
   - `mysql_adapter.py`, `postgres_adapter.py`, `sqlite_adapter.py`
 - `src/semantic/` — semantic metadata and schema dumps.
-  - `semantic_store.json`: semantic descriptions, notes, examples, allowlist
+- `semantic_store.json`: semantic descriptions, notes, examples, allowlist
+- `knowledge_graph.json`: business object graph, joins, metrics, synonyms, templates
   - `ddl_dump.json`: raw DDL snapshot (bootstrap)
 - `src/training/` — schema extraction and Vanna training.
   - `schema_extractor.py`: DDL/relationship/semantic training routines
@@ -221,6 +222,9 @@ askdb ask "新问题" --clear-context
       |        |
       v        |
   Validation (allowlist) <--- semantic_store.json
+      ^
+      |
+  Knowledge Graph (semantic/knowledge_graph.json)
       |
       v
   DB Adapter (src/db/*) ---> Target Database
@@ -238,6 +242,8 @@ askdb ask "新问题" --clear-context
 - **ChromaDB** (`chromadb`): local vector store for schema/docs/examples retrieval.
 - **prompt_toolkit**: semantic store TUI and interactive inputs.
 
+Ask also injects a small, question-matched knowledge-graph snippet (nodes/edges/metrics/templates) into the SQL prompt to guide joins and metrics without dumping the full graph.
+
 ### Module Map
 
 ```text
@@ -246,7 +252,7 @@ askdb/
 │   ├── cli/          # CLI commands, TUI, session state
 │   ├── config/       # DB + Vanna configuration
 │   ├── db/           # Database adapters (MySQL, Postgres, SQLite)
-│   ├── semantic/     # Semantic store + DDL dumps
+│   ├── semantic/     # Semantic store + DDL dumps + knowledge graph
 │   └── training/     # Schema extraction + Vanna training
 ├── chromadb_data/    # Local vector store (git-ignored)
 └── .env              # Environment variables
