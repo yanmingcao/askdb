@@ -196,8 +196,8 @@ askdb ask "新问题" --clear-context
 - `src/db/` — database adapters.
   - `mysql_adapter.py`, `postgres_adapter.py`, `sqlite_adapter.py`
 - `src/semantic/` — semantic metadata and schema dumps.
-- `semantic_store.json`: semantic descriptions, notes, examples, allowlist
-- `knowledge_graph.json`: business object graph, joins, metrics, synonyms, templates
+  - `semantic_store.json`: semantic descriptions, notes, examples, allowlist
+  - `knowledge_graph.json`: business object graph, joins, metrics, synonyms, templates
   - `ddl_dump.json`: raw DDL snapshot (bootstrap)
 - `src/training/` — schema extraction and Vanna training.
   - `schema_extractor.py`: DDL/relationship/semantic training routines
@@ -213,7 +213,6 @@ askdb ask "新问题" --clear-context
       v
   Vanna (src/config/vanna_config.py)
       |        ^
-      |        |
       v        |
   Context Retrieval (ChromaDB)
       |        |
@@ -222,8 +221,8 @@ askdb ask "新问题" --clear-context
       |        |
       v        |
   Validation (allowlist) <--- semantic_store.json
-      ^
       |
+      v
   Knowledge Graph (semantic/knowledge_graph.json)
       |
       v
@@ -311,6 +310,9 @@ Insights are on by default; use `--no-insights` to disable them.
 
 - Use `reset-training --yes` when you want to fully re-index semantic data.
 - Incremental training state is stored in `chromadb_data/training_state.json`.
+- When original database tables are not well-designed (i.e. not having much business semantics), you can design a layer of views (consisting of dimention and fact views) with business meaning on top of these tables, and then only expose these views and hide the original tables from LLM to generate proper SQL. Do not expose these views' definition either, only expose these views' columns.
+- You can also write a business-concept knowledge graph to guide NL2SQL. Nodes map to semantic views; edges encode join keys and recommended join paths. Metrics define aggregation rules. Extended with synonym dictionary and query template library for top business questions.
+- The trick is that you can ask a Tier-1 LLM to generate the semantic views and the knowledge graph for you. At run-time, you can use an inexpensive LLM to generate SQL.
 
 ## Example Verification
 
